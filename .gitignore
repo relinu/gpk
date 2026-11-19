@@ -12,3 +12,7 @@ gpk/tests/*
 gpk/testbuild/
 *.gpk
 *.log
+
+# Windows
+*.exe
+.wine/

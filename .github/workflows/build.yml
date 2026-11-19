@@ -1,0 +1,105 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+      # Portabel statt -march=native, damit die Programme auf jeder x86-64-CPU laufen
+      CFLAGS: -O2 -Wall -Wextra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Abhängigkeiten installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-18-dev zlib1g-dev liblzma-dev libbz2-dev libzstd1 liblz4-1
+
+      - name: GLZ und Benchmark bauen
+        run: make CC=$CC CFLAGS="$CFLAGS"
+
+      - name: GPK bauen
+        run: make -C gpk CC=$CC CFLAGS="$CFLAGS"
+
+      - name: Filter-Roundtrip-Fuzztest (ASan/UBSan)
+        run: make -C gpk test CC=$CC
+
+      - name: GLZ-Decoder-Fuzztest (ASan/UBSan)
+        run: |
+          $CC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all fuzz.c glz.c -lm -o fuzz_asan
+          ./fuzz_asan glz.c gpk/gpk.c gpk/lzrc.c /usr/lib/x86_64-linux-gnu/libz.so.1
+
+      - name: GPK-Rauchtest (packen, entpacken, bitgenau vergleichen)
+        run: python3 ci/smoke_test.py gpk/gpk
+
+      - name: Linux-Programme hochladen
+        if: matrix.cc == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpk-linux-x86_64
+          path: |
+            gpk/gpk
+            bench
+
+  windows-exe:
+    # Keine Windows-VM: Cross-Compiling mit MinGW-w64 und Test per Wine auf Ubuntu
+    name: Windows-.exe (Cross-Build + Wine)
+    runs-on: ubuntu-24.04
+    env:
+      WINEDEBUG: -all
+      WINEPREFIX: ${{ github.workspace }}/.wine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Abhängigkeiten installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc zlib1g-dev liblzma-dev gcc-mingw-w64-x86-64 libz-mingw-w64-dev wine wine64
+
+      - name: gpk.exe bauen (statisch, ohne DLL-Abhängigkeiten)
+        run: |
+          make -C gpk windows
+          x86_64-w64-mingw32-objdump -p gpk/gpk.exe | grep "DLL Name"
+
+      - name: Linux-gpk als Gegenstück bauen
+        run: make -C gpk gpk
+
+      - name: Wine vorbereiten
+        run: wineboot --init && wineserver -w
+
+      - name: Filter-Roundtrip-Test unter Wine
+        run: |
+          make -C gpk tests/filter_roundtrip.exe
+          wine gpk/tests/filter_roundtrip.exe
+
+      - name: GPK-Rauchtest unter Wine
+        run: python3 ci/smoke_test.py gpk/gpk.exe --wine
+
+      - name: Systemwechsel Linux -> Windows
+        run: |
+          python3 ci/smoke_test.py gpk/gpk --cross-pack linux.gpk
+          python3 ci/smoke_test.py gpk/gpk.exe --wine --cross-extract linux.gpk
+
+      - name: Systemwechsel Windows -> Linux
+        run: |
+          python3 ci/smoke_test.py gpk/gpk.exe --wine --cross-pack windows.gpk
+          python3 ci/smoke_test.py gpk/gpk --cross-extract windows.gpk
+
+      - name: gpk.exe hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpk-windows-x86_64
+          path: gpk/gpk.exe

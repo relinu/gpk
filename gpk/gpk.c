@@ -19,6 +19,9 @@
  *   "GPK1" | u64 index_off | u64 index_csize | u64 index_usize | u8 index_codec | Blöcke | Index
  */
 #define _GNU_SOURCE
+#ifdef _WIN32
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,15 +29,13 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <dirent.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <limits.h>
 #include <pthread.h>
-#include <time.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
 #include <zlib.h>
-#include <lzma.h>
+#ifndef GPK_NO_XZ
+#include <lzma.h>                 /* nur für den optionalen --xz-Kern */
+#endif
+#include "platform.h"
 #include "lzrc.h"
 #include "filters.h"
 #include "pngx.h"
@@ -52,7 +53,11 @@ static const char *const CLASS_NAMES[CL_N] = {"Text/Skripte", "x86-Programmcode"
 enum { E_FILE = 0, E_DIR = 1, E_LINK = 2 };
 
 static void die(const char *fmt, const char *arg) { fprintf(stderr, "gpk: "); fprintf(stderr, fmt, arg); fprintf(stderr, "\n"); exit(1); }
-static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static double now(void) { return plat_now(); }
+/* Pfad zusammensetzen; zu lange Pfade sind ein Fehler statt still abgeschnitten zu werden. */
+static void join(char *out, size_t cap, const char *a, const char *sep, const char *b) {
+    if ((size_t)snprintf(out, cap, "%s%s%s", a, sep, b) >= cap) die("Pfad zu lang: %s", b);
+}
 static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("%s", "Speicher voll"); return p; }
 
 /* ---------------- Optionen ---------------- */
@@ -118,8 +123,8 @@ static void add_entry(Entry e) {
 static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 static void scan(const char *root, const char *rel) {
-    char full[PATH_MAX];
-    snprintf(full, sizeof full, "%s%s%s", root, *rel ? "/" : "", rel);
+    char full[GPK_PATH];
+    join(full, sizeof full, root, *rel ? "/" : "", rel);
     DIR *d = opendir(full);
     if (!d) die("Kann Ordner nicht öffnen: %s", full);
     char **names = NULL; size_t nn = 0, cn = 0;
@@ -132,19 +137,19 @@ static void scan(const char *root, const char *rel) {
     closedir(d);
     qsort(names, nn, sizeof *names, cmpstr);
     for (size_t i = 0; i < nn; i++) {
-        char r[PATH_MAX], f[PATH_MAX];
-        snprintf(r, sizeof r, "%s%s%s", rel, *rel ? "/" : "", names[i]);
-        snprintf(f, sizeof f, "%s/%s", root, r);
+        char r[GPK_PATH], f[GPK_PATH];
+        join(r, sizeof r, rel, *rel ? "/" : "", names[i]);
+        join(f, sizeof f, root, "/", r);
         struct stat st;
         if (lstat(f, &st)) die("stat fehlgeschlagen: %s", f);
         Entry e = {0};
         e.path = strdup(r); e.mode = st.st_mode & 07777; e.mtime = st.st_mtime; e.content = NONE;
         if (S_ISDIR(st.st_mode)) { e.type = E_DIR; add_entry(e); scan(root, r); }
-        else if (S_ISREG(st.st_mode)) { e.type = E_FILE; e.size = (u64)st.st_size; add_entry(e); }
+        else if (S_ISREG(st.st_mode)) { e.type = E_FILE; e.size = plat_file_size(f); add_entry(e); }
         else if (S_ISLNK(st.st_mode)) {
-            char t[PATH_MAX]; ssize_t l = readlink(f, t, sizeof t - 1);
-            if (l < 0) die("readlink fehlgeschlagen: %s", f);
-            t[l] = 0; e.type = E_LINK; e.link = strdup(t); add_entry(e);
+            char t[GPK_PATH];
+            if (plat_readlink(f, t, sizeof t) < 0) die("readlink fehlgeschlagen: %s", f);
+            e.type = E_LINK; e.link = strdup(t); add_entry(e);
         }
         free(names[i]);
     }
@@ -357,11 +362,14 @@ static void compress_block(u32 bi, void *ctx) {
         size_t cap = lzrc_bound(b->usize);
         out = xmalloc(cap);
         cs = lzrc_compress(buf, b->usize, out, cap, &pr);
-    } else if (b->codec == CODEC_XZ) {
+    }
+#ifndef GPK_NO_XZ
+    else if (b->codec == CODEC_XZ) {
         size_t cap = b->usize + b->usize / 2 + 65536;
         out = xmalloc(cap);
         if (lzma_easy_buffer_encode(9 | LZMA_PRESET_EXTREME, LZMA_CHECK_NONE, NULL, buf, b->usize, out, &cs, cap) != LZMA_OK) cs = 0;
     }
+#endif
     if (!cs || cs >= b->usize) { free(out); b->codec = CODEC_STORED; b->cdata = buf; b->csize = b->usize; }
     else { free(buf); b->cdata = out; b->csize = cs; }
     fprintf(stderr, "  Block %3u/%u: %7.1f MB -> %7.1f MB  (%s)\n", bi + 1, nB, b->usize / 1e6, b->csize / 1e6,
@@ -394,13 +402,10 @@ typedef struct { const char *root; } HashCtx;
 static void hash_one(u32 i, void *ctx) {
     Entry *e = &E[i];
     if (e->type != E_FILE || !e->size) return;
-    char f[PATH_MAX]; snprintf(f, sizeof f, "%s/%s", ((HashCtx *)ctx)->root, e->path);
-    int fd = open(f, O_RDONLY);
-    if (fd < 0) die("Kann Datei nicht öffnen: %s", f);
-    void *m = mmap(NULL, e->size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (m == MAP_FAILED) die("mmap fehlgeschlagen: %s", f);
-    e->link = m;                        /* vorübergehend: Zeiger auf Dateidaten */
+    char f[GPK_PATH]; join(f, sizeof f, ((HashCtx *)ctx)->root, "/", e->path);
+    const u8 *m = plat_map(f, e->size);
+    if (!m) die("Kann Datei nicht lesen: %s", f);
+    e->link = (char *)m;                /* vorübergehend: Zeiger auf Dateidaten */
     e->crc = crc_of(m, e->size);
 }
 
@@ -425,7 +430,7 @@ static int cmd_compress(const char *dir, const char *outpath) {
         if (opt_dedup)
             for (u32 c = group_start; c < nC; c++)
                 if (C[c].size == e->size && C[c].crc == e->crc && !memcmp(C[c].data, e->link, e->size)) { found = c; break; }
-        if (found != NONE) { e->content = found; dup_bytes += e->size; dup_files++; munmap(e->link, e->size); e->link = NULL; continue; }
+        if (found != NONE) { e->content = found; dup_bytes += e->size; dup_files++; plat_unmap((const u8 *)e->link, e->size); e->link = NULL; continue; }
         Content *c = &C[nC]; memset(c, 0, sizeof *c);
         c->size = e->size; c->crc = e->crc; c->data = (const u8 *)e->link; c->path = e->path;
         const char *sl = strrchr(e->path, '/'); c->base = sl ? sl + 1 : e->path;
@@ -516,6 +521,7 @@ typedef struct { const u8 *map; size_t size; } Archive;
 
 static int safe_path(const char *p) {
     if (!*p || p[0] == '/') return 0;
+    for (const char *q = p; *q; q++) if (!plat_path_char_ok(*q)) return 0;
     const char *s = p;
     while (*s) {
         const char *e = strchr(s, '/'); size_t l = e ? (size_t)(e - s) : strlen(s);
@@ -527,13 +533,11 @@ static int safe_path(const char *p) {
 }
 
 static void load_archive(const char *path, Archive *a) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) die("Kann Archiv nicht öffnen: %s", path);
-    struct stat st; fstat(fd, &st);
-    a->size = (size_t)st.st_size;
-    a->map = mmap(NULL, a->size ? a->size : 1, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (a->map == MAP_FAILED || a->size < HDR_SIZE || memcmp(a->map, "GPK1", 4)) die("Kein GPK-Archiv: %s", path);
+    u64 sz = plat_file_size(path);
+    if (sz == UINT64_MAX) die("Kann Archiv nicht öffnen: %s", path);
+    a->size = (size_t)sz;
+    a->map = plat_map(path, sz);
+    if (!a->map || a->size < HDR_SIZE || memcmp(a->map, "GPK1", 4)) die("Kein GPK-Archiv: %s", path);
     u64 ioff, ics, ius; memcpy(&ioff, a->map + 4, 8); memcpy(&ics, a->map + 12, 8); memcpy(&ius, a->map + 20, 8);
     u8 icodec = a->map[28];
     if (ioff > a->size || ics > a->size - ioff || ius > (1ull << 32)) die("%s", "Index beschädigt");
@@ -588,9 +592,9 @@ static void load_archive(const char *path, Archive *a) {
 typedef struct { const Archive *a; const char *outdir; u32 **targets; u32 *ntargets; u32 **piece_crc; atomic_int failed; } XCtx;
 
 static void mkdirs(const char *path) {
-    char t[PATH_MAX]; snprintf(t, sizeof t, "%s", path);
-    for (char *p = t + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(t, 0755); *p = '/'; }
-    mkdir(t, 0755);
+    char t[GPK_PATH]; join(t, sizeof t, path, "", "");
+    for (char *p = t + 1; *p; p++) if (*p == '/' || *p == '\\') { char c = *p; *p = 0; plat_mkdir(t); *p = c; }
+    plat_mkdir(t);
 }
 
 static void extract_block(u32 bi, void *vctx) {
@@ -600,10 +604,13 @@ static void extract_block(u32 bi, void *vctx) {
     int ok = 1;
     if (b->codec == CODEC_STORED) { if (b->csize != b->usize) ok = 0; else memcpy(buf, src, b->usize); }
     else if (b->codec == CODEC_LZRC) ok = lzrc_decompress(src, b->csize, buf, b->usize);
+#ifndef GPK_NO_XZ
     else if (b->codec == CODEC_XZ) {
         uint64_t mem = UINT64_MAX; size_t ip = 0, op = 0;
         ok = lzma_stream_buffer_decode(&mem, 0, NULL, src, &ip, b->csize, buf, &op, b->usize) == LZMA_OK && op == b->usize;
-    } else ok = 0;
+    }
+#endif
+    else ok = 0;
     if (!ok) { fprintf(stderr, "gpk: Block %u beschädigt\n", bi); atomic_store(&x->failed, 1); free(buf); return; }
     u32 maxlen = 0;
     for (u32 k = 0; k < b->np; k++) if (b->pc[k].len > maxlen) maxlen = b->pc[k].len;
@@ -623,16 +630,11 @@ static void extract_block(u32 bi, void *vctx) {
         }
         x->piece_crc[bi][k] = crc_of(wdata, wlen);
         for (u32 t = 0; t < x->ntargets[p->content]; t++) {
-            char f[PATH_MAX]; snprintf(f, sizeof f, "%s/%s", x->outdir, E[x->targets[p->content][t]].path);
-            int fd = open(f, O_WRONLY);
+            char f[GPK_PATH]; join(f, sizeof f, x->outdir, "/", E[x->targets[p->content][t]].path);
+            int fd = plat_open_write(f, 0);
             if (fd < 0) { atomic_store(&x->failed, 1); continue; }
-            const u8 *w = wdata; u64 left = wlen, at = woff;
-            while (left) {
-                ssize_t r = pwrite(fd, w, left, (off_t)at);
-                if (r <= 0) { atomic_store(&x->failed, 1); break; }
-                w += r; at += (u64)r; left -= (u64)r;
-            }
-            close(fd);
+            if (plat_write_at(fd, wdata, wlen, woff)) atomic_store(&x->failed, 1);
+            plat_close(fd);
         }
         free(orig);
     }
@@ -643,18 +645,18 @@ static int cmd_extract(const char *archive, const char *outdir) {
     double t0 = now();
     Archive a; load_archive(archive, &a);
     mkdirs(outdir);
-    char f[PATH_MAX];
+    char f[GPK_PATH];
     u32 *ntargets = calloc(nC + 1, sizeof(u32)), **targets = calloc(nC + 1, sizeof(u32 *));
     for (u32 i = 0; i < nE; i++) {
         Entry *e = &E[i];
-        snprintf(f, sizeof f, "%s/%s", outdir, e->path);
+        join(f, sizeof f, outdir, "/", e->path);
         char *sl = strrchr(f, '/'); *sl = 0; mkdirs(f); *sl = '/';
         if (e->type == E_DIR) { mkdirs(f); continue; }
         if (e->type == E_LINK) continue;
-        int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = plat_open_write(f, 1);
         if (fd < 0) die("Kann Datei nicht anlegen: %s", f);
-        if (e->size && ftruncate(fd, (off_t)e->size)) die("ftruncate fehlgeschlagen: %s", f);
-        close(fd);
+        if (e->size && plat_set_size(fd, e->size)) die("Kann Dateigröße nicht setzen: %s", f);
+        plat_close(fd);
         if (e->size) {
             u32 c = e->content;
             targets[c] = realloc(targets[c], sizeof(u32) * (ntargets[c] + 1));
@@ -678,15 +680,15 @@ static int cmd_extract(const char *archive, const char *outdir) {
     /* Symlinks, Rechte, Zeitstempel */
     for (u32 i = 0; i < nE; i++) {
         Entry *e = &E[i];
-        snprintf(f, sizeof f, "%s/%s", outdir, e->path);
+        join(f, sizeof f, outdir, "/", e->path);
         if (e->type == E_LINK) {
             if (e->link[0] == '/') { fprintf(stderr, "gpk: absoluter Symlink übersprungen: %s\n", e->path); continue; }
-            unlink(f);
-            if (symlink(e->link, f)) fprintf(stderr, "gpk: Symlink fehlgeschlagen: %s\n", e->path);
+            plat_unlink(f);
+            if (plat_symlink(e->link, f)) fprintf(stderr, "gpk: Symlink nicht angelegt (auf diesem System nicht unterstützt?): %s\n", e->path);
             continue;
         }
-        chmod(f, e->mode);
-        if (e->type == E_FILE) { struct timespec ts[2] = {{e->mtime, 0}, {e->mtime, 0}}; utimensat(AT_FDCWD, f, ts, 0); }
+        plat_set_mode(f, e->mode);
+        if (e->type == E_FILE) plat_set_mtime(f, e->mtime);
     }
     double dt = now() - t0;
     u64 total = 0; for (u32 i = 0; i < nE; i++) if (E[i].type == E_FILE) total += E[i].size;
@@ -725,6 +727,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    plat_init_console();
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *pos[2]; int np = 0;
@@ -733,7 +736,13 @@ int main(int argc, char **argv) {
         if (!strcmp(s, "-l") && i + 1 < argc) g_level = atoi(argv[++i]);
         else if (!strcmp(s, "-t") && i + 1 < argc) g_threads = atoi(argv[++i]);
         else if (!strcmp(s, "-b") && i + 1 < argc) g_block = (u64)atoi(argv[++i]) << 20;
-        else if (!strcmp(s, "--xz")) opt_codec = CODEC_XZ;
+        else if (!strcmp(s, "--xz")) {
+#ifdef GPK_NO_XZ
+            die("%s", "--xz ist in diesem Build nicht verfügbar (ohne liblzma gebaut)");
+#else
+            opt_codec = CODEC_XZ;
+#endif
+        }
         else if (!strcmp(s, "--no-filter")) opt_filter = 0;
         else if (!strcmp(s, "--no-sort")) opt_sort = 0;
         else if (!strcmp(s, "--no-dedup")) opt_dedup = 0;
