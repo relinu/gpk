@@ -45,6 +45,18 @@ static inline int plat_write_at(int fd, const void *buf, uint64_t len, uint64_t 
     }
     return 0;
 }
+/* Liest genau len Bytes ab off; jeder Aufrufer nutzt ein eigenes Handle. */
+static inline int plat_read_at(int fd, void *buf, uint64_t len, uint64_t off) {
+    if (_lseeki64(fd, (long long)off, SEEK_SET) < 0) return -1;
+    uint8_t *p = buf;
+    while (len) {
+        unsigned k = len > (1u << 30) ? (1u << 30) : (unsigned)len;
+        int r = _read(fd, p, k);
+        if (r <= 0) return -1;
+        p += r; len -= (uint64_t)r;
+    }
+    return 0;
+}
 static inline void plat_set_mode(const char *p, uint32_t mode) { (void)p; (void)mode; }
 static inline void plat_set_mtime(const char *p, int64_t t) { struct __utimbuf64 u = {t, t}; _utime64(p, &u); }
 static inline int plat_symlink(const char *target, const char *p) { (void)target; (void)p; return -1; }
@@ -77,6 +89,15 @@ static inline int plat_write_at(int fd, const void *buf, uint64_t len, uint64_t 
     const uint8_t *p = buf;
     while (len) {
         ssize_t r = pwrite(fd, p, len, (off_t)off);
+        if (r <= 0) return -1;
+        p += r; len -= (uint64_t)r; off += (uint64_t)r;
+    }
+    return 0;
+}
+static inline int plat_read_at(int fd, void *buf, uint64_t len, uint64_t off) {
+    uint8_t *p = buf;
+    while (len) {
+        ssize_t r = pread(fd, p, len, (off_t)off);
         if (r <= 0) return -1;
         p += r; len -= (uint64_t)r; off += (uint64_t)r;
     }

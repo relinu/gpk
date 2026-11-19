@@ -12,6 +12,29 @@ make                                   # baut gpk und zstdtool
 make test                              # Filter-Roundtrip-Fuzztest (ASan/UBSan)
 ```
 
+## Speicherbedarf
+
+Der RAM-Bedarf hängt **nicht** von der Build-Größe ab:
+
+- Fertige Blöcke werden sofort ins Archiv geschrieben, in fester Reihenfolge
+  (Archive sind bei gleicher Eingabe bytegleich). Die Threads arbeiten höchstens
+  `Threads + 2` Blöcke voraus.
+- Dateien werden nur für den jeweiligen Arbeitsschritt eingeblendet.
+- Umgewandelte PNG-Daten werden in `<archiv>.auslagerung.tmp` neben dem Archiv
+  ausgelagert und am Ende gelöscht.
+- Beim Entpacken liest jeder Thread nur den Block, den er gerade entpackt.
+
+| Build | Packen (4 Threads) | Entpacken (4 Threads) |
+|---:|---:|---:|
+| 2,9 GB | 2,4 GB RAM (vorher 6,3 GB) | – |
+| 5,6 GB | 2,7 GB RAM | 0,5 GB RAM (vorher 6,1 GB) |
+| 15,4 GB | 2,3 GB RAM | 0,5 GB RAM |
+
+Faustregel beim Packen: etwa 11 × Blockgröße je Thread (LZRC-Binärbaum + Puffer).
+Mit `--max-ram GB` wählt GPK Threads und notfalls kleinere Blöcke passend zum Budget,
+z. B. `--max-ram 1` → 1 Thread, gemessen 0,7 GB. Weniger Threads oder kleinere Blöcke
+machen das Packen langsamer bzw. das Archiv etwas größer.
+
 ## Pipeline
 
 1. **Scannen**: Dateien, Ordner, Symlinks, Rechte (z. B. Ausführbar-Bit), Zeitstempel
