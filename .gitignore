@@ -1,0 +1,14 @@
+# Kompilierte Programme
+/bench
+/fuzz
+gpk/gpk
+gpk/zstdtool
+gpk/tests/*
+!gpk/tests/*.c
+*.o
+
+# Erzeugte Testdaten (reproduzierbar per gen_corpus.py / make_build.py)
+/corpus/
+gpk/testbuild/
+*.gpk
+*.log
