@@ -58,3 +58,15 @@ ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
 - **Windows-.exe:** Cross-Build mit MinGW-w64, Tests der `.exe` unter Wine,
   Archiv-Austausch Linux → Windows und Windows → Linux
 - Die fertigen Programme (`gpk`, `gpk.exe`) stehen als Artefakte am jeweiligen Lauf.
+
+## Releases
+
+Fertige Programme erscheinen automatisch unter *Releases*, sobald alle Builds und Tests grün sind:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0     # legt den Release an und hängt die Dateien an
+```
+
+Alternativ einen Release in der GitHub-Oberfläche veröffentlichen – die Pipeline hängt die
+Dateien dann an diesen Release an. Angehängt werden `gpk-<version>-linux-x86_64.tar.gz`,
+`gpk-<version>-windows-x86_64.zip` und `SHA256SUMS.txt`.

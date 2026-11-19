@@ -3,7 +3,10 @@ name: Build & Test
 on:
   push:
     branches: [main]
+    tags: ['v*']          # Tag v1.2.3 pushen -> Release mit Programmen
   pull_request:
+  release:
+    types: [published]    # in der GitHub-Oberfläche veröffentlichter Release -> Programme anhängen
   workflow_dispatch:
 
 jobs:
@@ -103,3 +106,41 @@ jobs:
         with:
           name: gpk-windows-x86_64
           path: gpk/gpk.exe
+
+  release:
+    name: Release-Dateien veröffentlichen
+    # Nur für Tags und veröffentlichte Releases, und nur wenn alle Builds und Tests grün sind
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows-exe]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build-Artefakte holen
+        uses: actions/download-artifact@v4
+        with:
+          path: artefakte
+
+      - name: Release-Pakete schnüren
+        run: |
+          mkdir -p dist/gpk-$TAG-linux-x86_64 dist/gpk-$TAG-windows-x86_64
+          install -m 755 artefakte/gpk-linux-x86_64/gpk/gpk dist/gpk-$TAG-linux-x86_64/gpk
+          cp artefakte/gpk-windows-x86_64/gpk.exe dist/gpk-$TAG-windows-x86_64/
+          for d in dist/gpk-$TAG-*; do cp README.md "$d/README.md"; cp gpk/README.md "$d/GPK.md"; done
+          cd dist
+          tar -czf gpk-$TAG-linux-x86_64.tar.gz gpk-$TAG-linux-x86_64
+          zip -qr gpk-$TAG-windows-x86_64.zip gpk-$TAG-windows-x86_64
+          sha256sum gpk-$TAG-*.tar.gz gpk-$TAG-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release anlegen (falls nötig) und Dateien hochladen
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "GPK $TAG" --generate-notes --verify-tag
+          fi
+          gh release upload "$TAG" dist/gpk-$TAG-linux-x86_64.tar.gz dist/gpk-$TAG-windows-x86_64.zip dist/SHA256SUMS.txt --clobber
