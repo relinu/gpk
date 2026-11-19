@@ -143,7 +143,7 @@ static void scan(const char *root, const char *rel) {
         struct stat st;
         if (lstat(f, &st)) die("stat fehlgeschlagen: %s", f);
         Entry e = {0};
-        e.path = strdup(r); e.mode = st.st_mode & 07777; e.mtime = st.st_mtime; e.content = NONE;
+        e.path = strdup(r); e.mode = plat_portable_mode(st.st_mode, S_ISDIR(st.st_mode)); e.mtime = st.st_mtime; e.content = NONE;
         if (S_ISDIR(st.st_mode)) { e.type = E_DIR; add_entry(e); scan(root, r); }
         else if (S_ISREG(st.st_mode)) { e.type = E_FILE; e.size = plat_file_size(f); add_entry(e); }
         else if (S_ISLNK(st.st_mode)) {

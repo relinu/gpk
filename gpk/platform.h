@@ -51,6 +51,12 @@ static inline int plat_symlink(const char *target, const char *p) { (void)target
 static inline int plat_readlink(const char *p, char *buf, size_t n) { (void)p; (void)buf; (void)n; return -1; }
 static inline void plat_unlink(const char *p) { _unlink(p); }
 static inline void plat_init_console(void) { SetConsoleOutputCP(CP_UTF8); }
+/* Windows kennt keine Unix-Rechte: portable Standardwerte ins Archiv schreiben
+ * (Ordner 0755, Dateien 0644, schreibgeschützte Dateien 0444). */
+static inline uint32_t plat_portable_mode(unsigned st_mode, int is_dir) {
+    if (is_dir) return 0755;
+    return (st_mode & _S_IWRITE) ? 0644 : 0444;
+}
 /* Windows: Pfade mit Backslash oder Laufwerksangabe könnten aus dem Zielordner ausbrechen. */
 static inline int plat_path_char_ok(char c) { return c != '\\' && c != ':'; }
 #else
@@ -82,6 +88,7 @@ static inline int plat_symlink(const char *target, const char *p) { return symli
 static inline int plat_readlink(const char *p, char *buf, size_t n) { ssize_t l = readlink(p, buf, n - 1); if (l >= 0) buf[l] = 0; return (int)l; }
 static inline void plat_unlink(const char *p) { unlink(p); }
 static inline void plat_init_console(void) {}
+static inline uint32_t plat_portable_mode(unsigned st_mode, int is_dir) { (void)is_dir; return st_mode & 07777; }
 static inline int plat_path_char_ok(char c) { (void)c; return 1; }
 #endif
 
