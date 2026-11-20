@@ -40,6 +40,7 @@
 #include "tcm.h"
 #include "filters.h"
 #include "pngx.h"
+#include "jpgx.h"
 #include "../glz.h"
 
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64; typedef int64_t i64;
@@ -75,7 +76,7 @@ typedef struct { char *path; int type; u32 mode; i64 mtime; u64 size; u32 crc; u
  * jeweiligen Arbeitsschritt eingeblendet, umgewandelte Daten (PNG) liegen in einer
  * Auslagerungsdatei (spill_off). ssize = Größe des zu komprimierenden Datenstroms. */
 typedef struct { u64 size; u32 crc; fspec f; int cls; const char *ext, *base, *path; int xform; u64 ssize; u64 spill_off; } Content;
-enum { XF_NONE = 0, XF_PNG = 1 };
+enum { XF_NONE = 0, XF_PNG = 1, XF_JPG = 2 };
 typedef struct { u32 content; u64 off; u32 len; } Piece;
 typedef struct { Piece *pc; u32 np, cap; u64 usize, off, csize; int codec; u8 *cdata; int done; } Block;
 
@@ -307,6 +308,16 @@ static void xform_one(u32 ci, void *ctx) {
     Content *c = &C[ci];
     if (c->size < 64) return;
     View v = view_original(c);
+    if (v.p[0] == 0xFF && v.p[1] == 0xD8 && v.p[2] == 0xFF) {   /* JPEG: verlustfreie Rekompression */
+        size_t tn = 0; u8 *t = jpgx_forward(v.p, c->size, &tn);
+        view_close(&v);
+        if (!t) return;
+        if (tn > g_block || tn > c->size * 0.97) { free(t); return; }
+        c->spill_off = spill_write(t, tn);
+        c->xform = XF_JPG; c->ssize = tn;
+        free(t);
+        return;
+    }
     if (v.p[0] != 0x89 || memcmp(v.p + 1, "PNG", 3)) { view_close(&v); return; }
     int bpp = pngx_channels(v.p, c->size);
     size_t t1n = 0, t2n = 0;
@@ -583,7 +594,7 @@ static int cmd_compress(const char *dir, const char *outpath) {
     }
     free(fi);
 
-    /* Umwandlungen (PNG-Rekompression), dann klassifizieren & Filter wählen */
+    /* Umwandlungen (PNG-/JPEG-Rekompression), dann klassifizieren & Filter wählen */
     for (u32 i = 0; i < nC; i++) C[i].ssize = C[i].size;
     if ((size_t)snprintf(g_spill_path, sizeof g_spill_path, "%s.auslagerung.tmp", outpath) >= sizeof g_spill_path) die("Pfad zu lang: %s", outpath);
     if (opt_filter) parallel_for(nC, xform_one, NULL);
@@ -592,8 +603,11 @@ static int cmd_compress(const char *dir, const char *outpath) {
         g_spill_map = plat_map(g_spill_path, g_spill_end);
         if (!g_spill_map) die("Kann Auslagerungsdatei nicht lesen: %s", g_spill_path);
     }
-    u32 npng = 0; u64 png_bytes = 0;
-    for (u32 i = 0; i < nC; i++) if (C[i].xform) { npng++; png_bytes += C[i].size; }
+    u32 npng = 0, njpg = 0; u64 png_bytes = 0, jpg_bytes = 0, jpg_after = 0;
+    for (u32 i = 0; i < nC; i++) {
+        if (C[i].xform == XF_PNG) { npng++; png_bytes += C[i].size; }
+        if (C[i].xform == XF_JPG) { njpg++; jpg_bytes += C[i].size; jpg_after += C[i].ssize; }
+    }
     parallel_for(nC, classify_one, NULL);
 
     /* Sortieren */
@@ -609,6 +623,8 @@ static int cmd_compress(const char *dir, const char *outpath) {
     for (int k = 0; k < CL_N; k++)
         if (cls_files[k]) fprintf(stderr, "  %-24s %5u Dateien %9.1f MB\n", CLASS_NAMES[k], cls_files[k], cls_bytes[k] / 1e6);
     if (npng) fprintf(stderr, "PNG-Rekompression: %u Dateien (%.1f MB) bitgenau umkehrbar\n", npng, png_bytes / 1e6);
+    if (njpg) fprintf(stderr, "JPEG-Rekompression: %u Dateien, %.1f -> %.1f MB (%.1f %%), bitgenau umkehrbar\n",
+                      njpg, jpg_bytes / 1e6, jpg_after / 1e6, 100.0 * ((double)jpg_after / jpg_bytes - 1));
     fprintf(stderr, "Filter:");
     for (int k = 0; k < FT_COUNT; k++) if (filt_cnt[k]) fprintf(stderr, " %s=%u", FILTER_NAMES[k], filt_cnt[k]);
     fprintf(stderr, "\n");
@@ -712,7 +728,7 @@ static void load_archive(const char *path, Archive *a) {
     for (u32 i = 0; i < nC && !r.err; i++) {
         memset(&C[i], 0, sizeof C[i]); C[i].size = GET(&r, u64); C[i].crc = GET(&r, u32); C[i].f = read_fspec(&r);
         C[i].xform = GET(&r, u8); C[i].ssize = GET(&r, u64);
-        if (C[i].xform > XF_PNG || (C[i].xform == XF_NONE && C[i].ssize != C[i].size) || (C[i].xform && C[i].ssize > g_block_max_ssize)) r.err = 1;
+        if (C[i].xform > XF_JPG || (C[i].xform == XF_NONE && C[i].ssize != C[i].size) || (C[i].xform && C[i].ssize > g_block_max_ssize)) r.err = 1;
     }
     nB = GET(&r, u32);
     if (nB > ius) die("%s", "Index beschädigt");
@@ -779,9 +795,10 @@ static void extract_block(u32 bi, void *vctx) {
         pos += p->len;
         const u8 *wdata = tmp; u64 wlen = p->len, woff = p->off;
         u8 *orig = NULL;
-        if (c->xform == XF_PNG) {                      /* PNG bitgenau wiederherstellen */
+        if (c->xform) {                                /* PNG/JPEG bitgenau wiederherstellen */
             orig = xmalloc(c->size);
-            if (!pngx_inverse(tmp, p->len, orig, c->size)) { atomic_store(&x->failed, 1); free(orig); continue; }
+            int okx = c->xform == XF_PNG ? pngx_inverse(tmp, p->len, orig, c->size) : jpgx_inverse(tmp, p->len, orig, c->size);
+            if (!okx) { atomic_store(&x->failed, 1); free(orig); continue; }
             wdata = orig; wlen = c->size; woff = 0;
         }
         x->piece_crc[bi][k] = crc_of(wdata, wlen);
