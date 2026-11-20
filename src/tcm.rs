@@ -78,12 +78,16 @@ struct Apm {
     idx: usize,
 }
 impl Apm {
-    fn new(n: usize) -> Self {
-        let mut t = vec![0u16; n * 33];
-        for i in 0..n {
-            for j in 0..33 {
-                t[i * 33 + j] = (squash((j as i32 - 16) * 128) * 16) as u16;
-            }
+    /// Tabelle für `n` Kontexte; ein vorhandener Puffer wird wiederverwendet.
+    fn with_buffer(mut t: Vec<u16>, n: usize) -> Self {
+        let mut row = [0u16; 33];
+        for (j, r) in row.iter_mut().enumerate() {
+            *r = (squash((j as i32 - 16) * 128) * 16) as u16;
+        }
+        t.clear();
+        t.reserve_exact(n * 33);
+        for _ in 0..n {
+            t.extend_from_slice(&row);
         }
         Apm { t, idx: 0 }
     }
@@ -143,17 +147,52 @@ struct Model {
     pos: u32,
 }
 
+/// Große Puffer eines Modells (~125 MB), werden je Thread wiederverwendet:
+/// spart das Anfordern und die Seitenfehler bei jedem Block.
+struct Buffers {
+    ht: Vec<Vec<u32>>,
+    mmt: Vec<u32>,
+    a2: Vec<u16>,
+}
+impl Buffers {
+    fn new() -> Self {
+        Buffers { ht: (0..NHASH).map(|_| vec![0u32; 1 << HBITS]).collect(), mmt: vec![0u32; 1 << MMBITS], a2: Vec::new() }
+    }
+    /// Gebrauchte Puffer auf den Anfangszustand zurücksetzen.
+    fn cleared(mut self) -> Self {
+        for t in &mut self.ht {
+            t.fill(0);
+        }
+        self.mmt.fill(0);
+        self
+    }
+}
+
+thread_local! {
+    static CACHE: std::cell::RefCell<Option<Buffers>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Führt `f` mit einem frischen Modell aus; die großen Puffer kommen aus dem Thread-Cache.
+fn with_model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
+    let bufs = CACHE.with(|c| c.borrow_mut().take()).map(Buffers::cleared).unwrap_or_else(Buffers::new);
+    let mut m = Model::new(bufs);
+    let r = f(&mut m);
+    let Model { ht, mmt, a2, .. } = *m;
+    CACHE.with(|c| *c.borrow_mut() = Some(Buffers { ht, mmt, a2: a2.t }));
+    r
+}
+
 impl Model {
-    fn new() -> Box<Self> {
+    fn new(b: Buffers) -> Box<Self> {
         let mut m = Box::new(Model {
             tab: tables(),
-            ht: (0..NHASH).map(|_| vec![0u32; 1 << HBITS]).collect(),
+            ht: b.ht,
             slot: [0; NHASH],
             hctx: [0; NHASH],
             o0: vec![1 << 31; 256 * 16],
             o0slot: 0,
             mm_sm: [1 << 31; 128],
-            mmt: vec![0u32; 1 << MMBITS],
+            mmt: b.mmt,
             mptr: 0,
             mlen: 0,
             w: vec![[(1 << 16) / 4; NIN]; 256],
@@ -165,8 +204,8 @@ impl Model {
             above: 0,
             x: [0; NIN],
             pmix: 0,
-            a1: Apm::new(256),
-            a2: Apm::new(65536),
+            a1: Apm::with_buffer(Vec::new(), 256),
+            a2: Apm::with_buffer(b.a2, 65536),
             c0: 1,
             c4: 0,
             word0: 0,
@@ -343,7 +382,10 @@ pub fn bound(n: usize) -> usize {
 }
 
 pub fn compress(src: &[u8]) -> Vec<u8> {
-    let mut m = Model::new();
+    with_model(|m| compress_with(m, src))
+}
+
+fn compress_with(m: &mut Model, src: &[u8]) -> Vec<u8> {
     let (mut x1, mut x2) = (0u32, 0xFFFF_FFFFu32);
     let mut out = Vec::with_capacity(src.len() / 4 + 64);
     for (i, &c) in src.iter().enumerate() {
@@ -374,7 +416,10 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
 /// Dekodiert genau `out.len()` Bytes. Beschädigte Daten liefern falsche Bytes
 /// (die CRC-Prüfung erkennt das), aber nie einen Speicherfehler.
 pub fn decompress(src: &[u8], out: &mut [u8]) {
-    let mut m = Model::new();
+    with_model(|m| decompress_with(m, src, out))
+}
+
+fn decompress_with(m: &mut Model, src: &[u8], out: &mut [u8]) {
     let (mut x1, mut x2, mut x) = (0u32, 0xFFFF_FFFFu32, 0u32);
     let mut ip = 0usize;
     let next = |ip: &mut usize| -> u32 {
@@ -424,6 +469,18 @@ mod tests {
             decompress(&c, &mut out);
             assert_eq!(out, d);
         }
+    }
+    #[test]
+    fn wiederverwendung_deterministisch() {
+        // Gleiche Eingabe nach anderen Blöcken im selben Thread: identische Ausgabe
+        let a = "Erster Block mit Text. ".repeat(3000).into_bytes();
+        let b = Rng::new(9).bytes(20_000);
+        let first = compress(&a);
+        let _ = compress(&b);
+        let mut out = vec![0u8; b.len()];
+        decompress(&compress(&b), &mut out);
+        assert_eq!(out, b);
+        assert_eq!(compress(&a), first);
     }
     #[test]
     fn corrupt_never_panics() {

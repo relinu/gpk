@@ -17,18 +17,24 @@ cargo test --release --features cref   # Tests + Differenztests gegen die C-Refe
 Der RAM-Bedarf hängt **nicht** von der Build-Größe ab:
 
 - Fertige Blöcke werden sofort ins Archiv geschrieben, in fester Reihenfolge
-  (Archive sind bei gleicher Eingabe bytegleich). Die Threads arbeiten höchstens
-  `Threads + 2` Blöcke voraus.
+  (Archive sind bei gleicher Eingabe bytegleich, unabhängig von der Threadzahl).
+  Die teuersten Blöcke werden zuerst begonnen, solange die begonnenen, noch nicht
+  geschriebenen Blöcke zusammen höchstens `(Threads + 1) × Blockgröße` umfassen.
 - Dateien werden nur bereichsweise gelesen, jeweils für den aktuellen Arbeitsschritt.
 - Umgewandelte PNG-/JPEG-Daten werden in `<archiv>.auslagerung.tmp` neben dem Archiv
   ausgelagert und am Ende gelöscht.
-- Beim Entpacken liest jeder Thread nur den Block, den er gerade entpackt.
+- Beim Entpacken liest jeder Thread nur den Block, den er gerade entpackt. Für Textblöcke
+  behält jeder Thread die Tabellen des Text-Kerns (~125 MB) und setzt sie nur zurück,
+  statt sie für jeden Block neu anzufordern.
 
 | Build | Packen (4 Threads) | Entpacken (4 Threads) |
 |---:|---:|---:|
 | 2,9 GB | 2,4 GB RAM (vorher 6,3 GB) | – |
 | 5,6 GB | 2,7 GB RAM | 0,5 GB RAM (vorher 6,1 GB) |
 | 15,4 GB | 2,3 GB RAM | 0,5 GB RAM |
+
+(Gemessen mit der C-Version. Die Rust-Version braucht beim Entpacken mit Textblöcken
+bis zu ~0,65 GB, weil jeder Thread die Text-Kern-Tabellen behält.)
 
 Faustregel beim Packen: etwa 11 × Blockgröße je Thread (LZRC-Binärbaum + Puffer).
 Mit `--max-ram GB` wählt GPK Threads und notfalls kleinere Blöcke passend zum Budget,
@@ -61,12 +67,38 @@ machen das Packen langsamer bzw. das Archiv etwas größer.
 6. **Komprimieren** in unabhängigen 64-MiB-Blöcken, parallel, mit **LZRC**
    (LZ77 + Binärbaum-Match-Finder + optimales Parsing + adaptiver Range Coder,
    LZMA-Prinzip, eigene Implementierung) – wahlweise `--xz` als Kern.
-   **Textblöcke** (8 MiB, reiner Text) werden zusätzlich mit dem Context-Mixing-Kern
+   **Textblöcke** (4 MiB, reiner Text) werden mit dem Context-Mixing-Kern
    **TCM** kodiert (Ordnungen 0–6, Wort-, Spalten- und Match-Modell, zwei Mischnetze,
-   zwei APM-Stufen); das kleinere Ergebnis gewinnt. Abschaltbar mit `--no-cm`.
+   zwei APM-Stufen); LZRC wird dort nur noch zusätzlich probiert, wenn eine schnelle
+   Schätzung ihm eine Chance gibt (auf Text fast nie). Abschaltbar mit `--no-cm`.
+   TCM entpackt nur ~1,5 MB/s je Thread; 4 statt 8 MiB kosten +0,45 % Textgröße,
+   verteilen das Entpacken aber auf mehr Threads.
 
 Alle Kerne rechnen **nur mit Ganzzahlen**: Linux und Windows erzeugen und lesen
 dieselben Archive bitgleich (in der CI geprüft: Linux ↔ Windows-.exe unter Wine).
+
+## Geschwindigkeit (Rust-Version)
+
+Phasenzeiten beim Packen und Zeiten je Block beim Entpacken zeigt `GPK_ZEITEN=1 gpk …`.
+
+- **Filterwahl**: Für Strukturdaten gibt es bis zu ~13 Filterkandidaten. Ein schneller
+  Schätzer (`lzrc::estimate`: gleiches Modell und gleicher Range-Coder, aber gieriges
+  Parsing statt optimaler DP) wählt die zwei aussichtsreichsten vor; echt probekomprimiert
+  werden nur diese und „ohne Filter“. Gemessen: Klassifizieren 21,3 → 12,5 s,
+  Archiv +2,5 KB.
+- **Reihenfolge**: Beim Packen, Klassifizieren und Entpacken laufen die teuersten Aufgaben
+  zuerst (Text-CM-Blöcke ~40× teurer als LZRC), damit am Ende kein großer Brocken allein läuft.
+- Ausprobiert und verworfen (kein messbarer Gewinn): Mikro-Optimierungen und SSE4.2/AVX2
+  im Text-Kern (der Kern hängt an der seriellen Abhängigkeit pro Bit), andere Parse-Fenster,
+  Preis-Aktualisierungsintervalle und Suchtiefen im LZRC-Encoder (alle innerhalb ±0,1 %).
+- Grenze beim Packen: Ein 64-MiB-LZRC-Block braucht allein ~45 s (Binärbaum mit 0,5 GB
+  wird groß, die Suche langsamer); er bestimmt bei großen Blöcken die Mindestdauer.
+
+| Test-Build 308 MB, 4 Threads | vorher | nachher |
+|---|---:|---:|
+| Archiv | 120.266.104 B | 120.278.468 B (+0,01 %) |
+| Packen | 92,8 s, 1,46 GB RAM | 64,3 s, 1,67 GB RAM |
+| Entpacken | 8,3 s, 0,44 GB RAM | 6,8 s, 0,61 GB RAM |
 
 ## Ergebnisse v3 (erweiterter Test-Build 327,6 MB, mit 36 JPEGs)
 

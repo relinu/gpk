@@ -20,6 +20,9 @@ const NONE: u32 = u32::MAX;
 const SAMPLE: usize = 384 << 10;
 const HDR_SIZE: usize = 4 + 8 + 8 + 8 + 1;
 const MAX_XFORM_SSIZE: u64 = 1 << 30;
+/// Blockgröße für Text mit dem Context-Mixing-Kern (TCM entpackt nur ~1,5 MB/s je Thread;
+/// 4 MiB: gemessen +0,45 % Textgröße gegenüber 8 MiB, Entpacken deutlich paralleler)
+const TEXT_BLOCK: u64 = 4 << 20;
 
 pub const CODEC_STORED: u8 = 0;
 pub const CODEC_LZRC: u8 = 1;
@@ -233,6 +236,23 @@ fn mtime_secs(md: &fs::Metadata) -> i64 {
     }
 }
 
+/// Zeitmessung der Phasen (Ausgabe mit Umgebungsvariable GPK_ZEITEN=1).
+struct Phases {
+    t: Instant,
+    on: bool,
+}
+impl Phases {
+    fn new() -> Self {
+        Phases { t: Instant::now(), on: std::env::var_os("GPK_ZEITEN").is_some() }
+    }
+    fn mark(&mut self, name: &str) {
+        if self.on {
+            eprintln!("[Zeit] {name}: {:.2} s", self.t.elapsed().as_secs_f64());
+        }
+        self.t = Instant::now();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parallelität
 // ---------------------------------------------------------------------------
@@ -253,8 +273,18 @@ fn parallel_for(n: usize, threads: usize, f: impl Fn(usize) + Sync) {
 }
 /// Paralleles Map mit Ergebnissen in Eingabereihenfolge.
 fn parallel_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    parallel_map_by_cost(&[], n, threads, f)
+}
+/// Wie `parallel_map`, aber die teuersten Aufgaben zuerst (`cost[i]`; leer = Eingabereihenfolge):
+/// vermeidet, dass am Ende ein großer Brocken allein auf einem Thread läuft.
+fn parallel_map_by_cost<T: Send>(cost: &[u64], n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let mut order: Vec<usize> = (0..n).collect();
+    if cost.len() == n {
+        order.sort_by_key(|&i| std::cmp::Reverse(cost[i]));
+    }
     let out: Mutex<Vec<Option<T>>> = Mutex::new((0..n).map(|_| None).collect());
-    parallel_for(n, threads, |i| {
+    parallel_for(n, threads, |k| {
+        let i = order[k];
         let v = f(i);
         out.lock().unwrap()[i] = Some(v);
     });
@@ -601,8 +631,23 @@ impl<'a> Packer<'a> {
                 }
             }
         }
-        let (mut best, mut none_size, mut chosen) = (usize::MAX, 0usize, none);
+        // Viele Kandidaten: mit dem schnellen Schätzer die zwei aussichtsreichsten vorwählen;
+        // echt probekomprimiert (LZRC Stufe 2) werden nur "ohne Filter" und diese zwei.
         let mut tmp = vec![0u8; sn];
+        if cand.len() > 3 {
+            let mut est: Vec<(usize, usize)> = cand[1..]
+                .iter()
+                .enumerate()
+                .map(|(k, f)| {
+                    filters::encode(f, &s, &mut tmp, soff);
+                    (lzrc::estimate(&tmp), k + 1)
+                })
+                .collect();
+            est.sort();
+            let keep: Vec<FSpec> = std::iter::once(cand[0]).chain(est.iter().take(2).map(|&(_, k)| cand[k])).collect();
+            cand = keep;
+        }
+        let (mut best, mut none_size, mut chosen) = (usize::MAX, 0usize, none);
         for (k, f) in cand.iter().enumerate() {
             filters::encode(f, &s, &mut tmp, soff);
             let z = lz_size(&tmp);
@@ -679,6 +724,9 @@ struct Writer {
     pending: Vec<Option<(u8, Vec<u8>)>>,
     placed: Vec<(u64, u64, u8)>, // (off, csize, codec)
     err: Option<Error>,
+    started: Vec<bool>,
+    /// Summe der Rohgrößen begonnener, noch nicht geschriebener Blöcke
+    held: u64,
 }
 
 /// Packt den Ordner `dir` nach `outpath`.
@@ -690,6 +738,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     let mut entries = Vec::new();
     scan(dir, b"", &mut entries)?;
 
+    let mut ph = Phases::new();
+    ph.mark("Scan");
     // CRC aller Dateien (parallel)
     let crcs = parallel_map(entries.len(), opt.threads, |i| {
         let e = &entries[i];
@@ -702,6 +752,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         e.crc = c?;
     }
 
+    ph.mark("CRC");
     // Deduplizieren
     let mut fi: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].typ == E_FILE && entries[i].size > 0).collect();
     fi.sort_by(|&a, &b| {
@@ -740,12 +791,14 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         entries[ei].content = (contents.len() - 1) as u32;
     }
 
+    ph.mark("Dedup");
     // Umwandlungen (PNG/JPEG), dann klassifizieren
     let mut spill_name = outpath.as_os_str().to_owned();
     spill_name.push(".auslagerung.tmp");
     let mut pk = Packer { root: dir, opt, spill: Spill { path: PathBuf::from(spill_name), w: Mutex::new(None) }, spill_read: None };
     if opt.filter {
-        let xs = parallel_map(contents.len(), opt.threads, |i| pk.xform_one(&contents[i]));
+        let sizes: Vec<u64> = contents.iter().map(|c| c.size).collect();
+        let xs = parallel_map_by_cost(&sizes, contents.len(), opt.threads, |i| pk.xform_one(&contents[i]));
         for (c, x) in contents.iter_mut().zip(xs) {
             if let Some((xf, ssize, off)) = x? {
                 c.xform = xf;
@@ -770,13 +823,16 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             jpg_after += c.ssize;
         }
     }
-    let cls = parallel_map(contents.len(), opt.threads, |i| pk.classify_one(&contents[i]));
+    ph.mark("PNG/JPEG");
+    let ssizes: Vec<u64> = contents.iter().map(|c| c.ssize.min(SAMPLE as u64)).collect();
+    let cls = parallel_map_by_cost(&ssizes, contents.len(), opt.threads, |i| pk.classify_one(&contents[i]));
     for (c, r) in contents.iter_mut().zip(cls) {
         let (cl, f) = r?;
         c.cls = cl;
         c.f = f;
     }
 
+    ph.mark("Klassifizieren");
     // Sortieren
     let mut order: Vec<usize> = (0..contents.len()).collect();
     if opt.sort {
@@ -830,8 +886,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             if (c.cls == CL_RAW) != raw {
                 continue;
             }
-            // Text mit Context-Mixing-Kern: 8-MiB-Blöcke (paralleles Entpacken)
-            let cap = if opt.cm && opt.codec == CODEC_LZRC && c.cls == CL_TEXT && opt.block > (8 << 20) { 8 << 20 } else { opt.block };
+            // Text mit Context-Mixing-Kern: kleinere Blöcke, damit das Entpacken parallel läuft
+            let cap = if opt.cm && opt.codec == CODEC_LZRC && c.cls == CL_TEXT && opt.block > TEXT_BLOCK { TEXT_BLOCK } else { opt.block };
             let mut off = 0u64;
             while off < c.ssize {
                 let len = (c.ssize - off).min(cap) as u32;
@@ -860,7 +916,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     let mut out = File::create(outpath).map_err(|e| io_err("Kann Archiv nicht schreiben", outpath, e))?;
     out.write_all(&[0u8; HDR_SIZE]).map_err(|e| io_err("Schreibfehler", outpath, e))?;
     let nb = blocks.len();
-    let ahead = opt.threads.max(1) + 2;
+    // Speicherbudget für fertige, noch nicht geschriebene Blöcke (wie in est_ram)
+    let budget = (opt.threads.max(1) as u64 + 1) * opt.block;
     let writer = Mutex::new(Writer {
         out,
         off: HDR_SIZE as u64,
@@ -868,20 +925,39 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         pending: (0..nb).map(|_| None).collect(),
         placed: vec![(0, 0, 0); nb],
         err: None,
+        started: vec![false; nb],
+        held: 0,
     });
     let cv = Condvar::new();
     let failed = AtomicBool::new(false);
-    parallel_for(nb, opt.threads, |bi| {
-        {
-            // nicht zu weit vorauslaufen
+    // Geschätzter Aufwand je Block: gespeicherte Blöcke kosten fast nichts
+    let cost: Vec<u64> = blocks.iter().map(|b| if b.codec == CODEC_STORED { b.usize / 64 } else { b.usize }).collect();
+    let worker = || loop {
+        // Teuersten noch nicht begonnenen Block wählen, solange die begonnenen, noch nicht
+        // geschriebenen Blöcke ins Speicherbudget passen. Der nächste zu schreibende Block
+        // ist immer erlaubt, daher kein Stillstand.
+        let bi = {
             let mut w = writer.lock().unwrap();
-            while bi >= w.next + ahead && w.err.is_none() {
+            loop {
+                if w.err.is_some() {
+                    return;
+                }
+                let (next, held) = (w.next, w.held);
+                let pick = (next..nb)
+                    .filter(|&i| !w.started[i] && (i == next || held + blocks[i].usize <= budget))
+                    .max_by_key(|&i| (cost[i], std::cmp::Reverse(i)));
+                if let Some(bi) = pick {
+                    w.started[bi] = true;
+                    w.held += blocks[bi].usize;
+                    break bi;
+                }
+                if w.started.iter().all(|&x| x) {
+                    return;
+                }
                 w = cv.wait(w).unwrap();
             }
-            if w.err.is_some() {
-                return;
-            }
-        }
+        };
+        let t_start = t0.elapsed().as_secs_f64();
         let res = (|| -> Result<(u8, Vec<u8>)> {
             let b = &blocks[bi];
             let mut buf = vec![0u8; b.usize as usize];
@@ -903,14 +979,22 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
                     pr.lc = 4;
                     pr.pb = 0;
                 }
-                let lz = lzrc::compress(&buf, &pr);
-                cdata = Some(lz);
                 if opt.cm && text * 2 > b.usize {
+                    // Text: Context-Mixing-Kern. LZRC (teuer) nur zusätzlich probieren, wenn die
+                    // schnelle Schätzung ihm überhaupt eine Chance gibt (auf Text fast nie).
                     let t = tcm::compress(&buf);
-                    if t.len() < cdata.as_ref().unwrap().len() {
+                    if (lzrc::estimate(&buf) as f64) < t.len() as f64 * 1.25 {
+                        let lz = lzrc::compress(&buf, &pr);
+                        if lz.len() <= t.len() {
+                            cdata = Some(lz);
+                        }
+                    }
+                    if cdata.is_none() {
                         cdata = Some(t);
                         codec = CODEC_TCM;
                     }
+                } else {
+                    cdata = Some(lzrc::compress(&buf, &pr));
                 }
             } else if codec == CODEC_XZ {
                 cdata = xz_compress(&buf)?;
@@ -920,6 +1004,15 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
                 _ => (CODEC_STORED, buf),
             })
         })();
+        if ph.on {
+            eprintln!(
+                "[Zeit] Block {:3}: {:6.1} MB  {:6.1} s .. {:6.1} s",
+                bi + 1,
+                blocks[bi].usize as f64 / 1e6,
+                t_start,
+                t0.elapsed().as_secs_f64()
+            );
+        }
         let mut w = writer.lock().unwrap();
         match res {
             Ok((codec, data)) => {
@@ -943,6 +1036,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
                         break;
                     }
                     w.off += data.len() as u64;
+                    w.held -= blocks[i].usize;
                     w.placed[i] = (off, data.len() as u64, codec);
                     w.next += 1;
                 }
@@ -953,6 +1047,12 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             }
         }
         cv.notify_all();
+    };
+    let nthreads = opt.threads.clamp(1, 64).min(nb.max(1));
+    std::thread::scope(|sc| {
+        for _ in 0..nthreads {
+            sc.spawn(worker);
+        }
     });
     let mut w = writer.into_inner().unwrap();
     if let Some(e) = w.err.take() {
@@ -973,6 +1073,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     }
     let data_end = w.off;
 
+    ph.mark("Komprimieren");
     // Index
     let mut ix = Vec::new();
     ix.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -1251,13 +1352,28 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         }
     }
     let failed = AtomicBool::new(false);
-    let piece_crc: Vec<Vec<u32>> = parallel_map(a.blocks.len(), threads, |bi| {
+    let zeiten = std::env::var_os("GPK_ZEITEN").is_some();
+    // Geschätzter Entpackaufwand je Block: Text-CM ~40x LZRC, Bild-Rückwandlung teuer, Gespeichertes billig
+    let cost: Vec<u64> = a
+        .blocks
+        .iter()
+        .map(|b| {
+            let base = match b.codec {
+                CODEC_TCM => b.usize * 40,
+                CODEC_STORED => b.usize / 8,
+                _ => b.usize,
+            };
+            base + b.pieces.iter().map(|p| if a.contents[p.content as usize].xform != XF_NONE { p.len as u64 * 20 } else { 0 }).sum::<u64>()
+        })
+        .collect();
+    let piece_crc: Vec<Vec<u32>> = parallel_map_by_cost(&cost, a.blocks.len(), threads, |bi| {
         let b = &a.blocks[bi];
         let mut crcs = vec![0u32; b.pieces.len()];
         let fail = |msg: String| {
             eprintln!("gpk: {msg}");
             failed.store(true, Ordering::Relaxed);
         };
+        let tb = Instant::now();
         let mut src = vec![0u8; b.csize as usize];
         let ok = File::open(&a.path).and_then(|f| read_at(&f, &mut src, b.off)).is_ok();
         if !ok {
@@ -1287,6 +1403,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
             fail(format!("Block {bi} beschädigt"));
             return crcs;
         }
+        let t_dec = tb.elapsed().as_secs_f64();
         let mut pos = 0usize;
         for (k, p) in b.pieces.iter().enumerate() {
             let c = &a.contents[p.content as usize];
@@ -1314,6 +1431,17 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
                     fail(format!("Schreibfehler: {e}"));
                 }
             }
+        }
+        if zeiten {
+            let codec = ["gespeichert", "LZRC", "xz", "Text-CM"].get(b.codec as usize).unwrap_or(&"?");
+            eprintln!(
+                "[Zeit] Block {:3}: {:6.1} MB {:<11} dekodieren {:5.2} s, Rest {:5.2} s",
+                bi + 1,
+                b.usize as f64 / 1e6,
+                codec,
+                t_dec,
+                tb.elapsed().as_secs_f64() - t_dec
+            );
         }
         crcs
     });

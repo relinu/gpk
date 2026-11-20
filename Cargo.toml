@@ -13,12 +13,20 @@ path = "src/lib.rs"
 name = "gpk"
 path = "src/main.rs"
 
+# Messwerkzeuge (Rust gegen C-Referenz): cargo run --release --features cref --example prof -- <build>
+[[example]]
+name = "prof"
+required-features = ["cref"]
+
+[[example]]
+name = "tcmbench"
+required-features = ["cref"]
+
 [dependencies]
 # Echte zlib (statisch gebaut): nötig, um zlib-erzeugte PNG-Deflate-Ströme bitgenau neu zu erzeugen
 libz-sys = { version = "1", default-features = false, features = ["static"] }
 libc = "0.2"
 crc32fast = "1"
-memmap2 = "0.9"
 # Optionaler xz-Kern (--xz) über liblzma, statisch gebaut
 xz2 = { version = "0.1", features = ["static"], optional = true }
 

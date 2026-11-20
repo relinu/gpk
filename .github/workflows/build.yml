@@ -65,15 +65,18 @@ jobs:
       - name: GPK-Rauchtest (packen, entpacken, bitgenau vergleichen)
         run: python3 ci/smoke_test.py target/release/gpk
 
-      - name: Archive bytegleich zur C-Version, Kreuz-Entpacken C <-> Rust
+      - name: Deterministisch (1 vs. 4 Threads), Formatgleichheit mit der C-Version
         run: |
           make -C legacy-c/gpk gpk CFLAGS="-O2 -Wall -Wextra"
           python3 ci/smoke_test.py --make-tree baum
+          target/release/gpk c -t 1 baum rust1.gpk
+          target/release/gpk c -t 4 -b 1 baum rust4.gpk
+          target/release/gpk c -t 4 baum rust.gpk
+          cmp rust1.gpk rust.gpk && echo "Archive unabhängig von der Threadzahl"
           legacy-c/gpk/gpk c -t 3 baum c.gpk
-          target/release/gpk c -t 3 baum rust.gpk
-          cmp c.gpk rust.gpk && echo "Archive bytegleich"
           target/release/gpk x c.gpk aus-rust && diff -r baum aus-rust
           legacy-c/gpk/gpk x rust.gpk aus-c && diff -r baum aus-c
+          legacy-c/gpk/gpk x rust4.gpk aus-c4 && diff -r baum aus-c4
 
       - name: Linux-Programm hochladen
         uses: actions/upload-artifact@v4

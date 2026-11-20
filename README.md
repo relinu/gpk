@@ -7,7 +7,8 @@ Entpacken mit CRC-Prüfung. Details: [docs/GPK.md](docs/GPK.md).
 
 Das Programm ist in **Rust** geschrieben (`src/`). Die frühere C-Version liegt als Referenz
 in `legacy-c/` (inkl. GLZ, dem Laufzeit-Asset-Kompressor, siehe [docs/GLZ.md](docs/GLZ.md)).
-Rust- und C-Version erzeugen **bytegleiche Archive**; das prüft die CI bei jedem Push.
+Rust- und C-Version verwenden dasselbe Archivformat und entpacken die Archive der jeweils
+anderen; die Kerne (Filter, LZRC, TCM, PNG, JPEG) sind bytegleich, das prüft die CI bei jedem Push.
 
 ## Kernergebnis (Test-Build 327,6 MB inkl. JPEGs)
 
@@ -22,13 +23,17 @@ Rust- und C-Version erzeugen **bytegleiche Archive**; das prüft die CI bei jede
 Details, Ablationen und Abwägungen: [docs/GPK.md](docs/GPK.md) und [docs/vergleich.md](docs/vergleich.md).
 Der Test-Build ist teilweise synthetisch (Code, Skripte, Schriften sind echte Dateien).
 
-## Rust- vs. C-Version (Test-Build 308 MB, 4 Threads)
+## Rust-Version: Port und Optimierung (Test-Build 308 MB, 4 Threads)
 
-| | C (`legacy-c/`) | Rust |
+| | Rust-Port (Archive bytegleich zu C) | Rust optimiert |
 |---|---:|---:|
-| Archiv | 120,27 MB | 120,27 MB (bytegleich) |
-| Packen | 104,3 s, 1,50 GB RAM | 104,7 s, 1,47 GB RAM |
-| Entpacken | 8,0 s, 0,50 GB RAM | 9,1 s, 0,45 GB RAM |
+| Archiv | 120,27 MB | 120,28 MB (+0,01 %) |
+| Packen | 92,8 s, 1,46 GB RAM | **64,3 s**, 1,67 GB RAM |
+| Entpacken | 8,3 s, 0,44 GB RAM | **6,8 s**, 0,61 GB RAM |
+
+Beide Spalten direkt hintereinander gemessen. Der reine Port war so schnell wie die C-Version
+(in einer früheren Messung Packen 104,7 s gegenüber 104,3 s).
+Was optimiert wurde und was nicht geholfen hat: [docs/GPK.md](docs/GPK.md#geschwindigkeit-rust-version).
 
 ## Schnellstart
 
@@ -88,8 +93,8 @@ ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
 
 - **Linux:** `cargo fmt`/`clippy`, Tests und Differenztests gegen die C-Referenz, Tests im
   Debug-Modus (Überlaufprüfungen), Rauchtest (packen, entpacken, bitgenau vergleichen,
-  beschädigtes Archiv muss abgelehnt werden), Bytegleichheit der Archive C ↔ Rust und
-  Kreuz-Entpacken
+  beschädigtes Archiv muss abgelehnt werden), gleiche Archive bei 1 und 4 Threads,
+  Kreuz-Entpacken C ↔ Rust
 - **Windows-.exe:** Cross-Build, Unit- und Rauchtests der `.exe` unter Wine,
   Archiv-Austausch Linux → Windows und Windows → Linux
 - Die fertigen Programme (`gpk`, `gpk.exe`) stehen als Artefakte am jeweiligen Lauf.
