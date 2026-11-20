@@ -684,10 +684,8 @@ fn lz_decode_block(d: &[u8], out: &mut [u8]) -> Option<()> {
         let off = match oc {
             0 => rep0,
             1 => {
-                let o = rep1;
-                rep1 = rep0;
-                rep0 = o;
-                o
+                std::mem::swap(&mut rep0, &mut rep1);
+                rep0
             }
             _ => {
                 let b = oc - 2;

@@ -44,7 +44,10 @@ extern "C" {
 }
 
 /// Von C mit malloc erzeugten Puffer als Vec übernehmen (kopiert, gibt frei).
-pub fn take(p: *mut u8, n: usize) -> Option<Vec<u8>> {
+///
+/// # Safety
+/// `p` ist null oder zeigt auf `n` gültige Bytes, die mit `malloc` angelegt wurden und danach nicht mehr benutzt werden.
+pub unsafe fn take(p: *mut u8, n: usize) -> Option<Vec<u8>> {
     if p.is_null() {
         return None;
     }

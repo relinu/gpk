@@ -2,59 +2,82 @@ name: Build & Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust-port]
     tags: ['v*']          # Tag v1.2.3 pushen -> Release mit Programmen
   pull_request:
   release:
     types: [published]    # in der GitHub-Oberfläche veröffentlichter Release -> Programme anhängen
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
 jobs:
   linux:
-    name: Linux (${{ matrix.cc }})
+    name: Linux (Rust)
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        cc: [gcc, clang]
-    env:
-      CC: ${{ matrix.cc }}
-      # Portabel statt -march=native, damit die Programme auf jeder x86-64-CPU laufen
-      CFLAGS: -O2 -Wall -Wextra
     steps:
       - uses: actions/checkout@v4
 
-      - name: Abhängigkeiten installieren
+      - name: Rust-Werkzeuge
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          cargo --version
+
+      - name: Abhängigkeiten (C-Referenz, Testbilder)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang libclang-rt-18-dev zlib1g-dev liblzma-dev libbz2-dev libzstd1 liblz4-1
+          sudo apt-get install -y --no-install-recommends zlib1g-dev liblzma-dev python3-pil
 
-      - name: GLZ und Benchmark bauen
-        run: make CC=$CC CFLAGS="$CFLAGS"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ hashFiles('Cargo.lock') }}
 
-      - name: GPK bauen
-        run: make -C gpk CC=$CC CFLAGS="$CFLAGS"
+      - name: Formatierung
+        run: cargo fmt --check
 
-      - name: Filter-Roundtrip-Fuzztest (ASan/UBSan)
-        run: make -C gpk test CC=$CC
+      - name: Clippy
+        run: cargo clippy --all-targets --features cref
 
-      - name: GLZ-Decoder-Fuzztest (ASan/UBSan)
-        run: |
-          $CC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all fuzz.c glz.c -lm -o fuzz_asan
-          ./fuzz_asan glz.c gpk/gpk.c gpk/lzrc.c /usr/lib/x86_64-linux-gnu/libz.so.1
+      - name: Testbilder erzeugen
+        run: python3 tools/gen_testimages.py testbilder/png testbilder/jpg
+
+      - name: Tests und Differenztests gegen die C-Referenz (bytegleich)
+        env:
+          GPK_PNG_DIR: ${{ github.workspace }}/testbilder/png
+          GPK_JPEG_DIR: ${{ github.workspace }}/testbilder/jpg
+        run: cargo test --release --features cref
+
+      - name: Tests im Debug-Modus (Überlaufprüfungen aktiv)
+        run: cargo test --lib
+
+      - name: gpk bauen
+        run: cargo build --release
 
       - name: GPK-Rauchtest (packen, entpacken, bitgenau vergleichen)
-        run: python3 ci/smoke_test.py gpk/gpk
+        run: python3 ci/smoke_test.py target/release/gpk
 
-      - name: Linux-Programme hochladen
-        if: matrix.cc == 'gcc'
+      - name: Archive bytegleich zur C-Version, Kreuz-Entpacken C <-> Rust
+        run: |
+          make -C legacy-c/gpk gpk CFLAGS="-O2 -Wall -Wextra"
+          python3 ci/smoke_test.py --make-tree baum
+          legacy-c/gpk/gpk c -t 3 baum c.gpk
+          target/release/gpk c -t 3 baum rust.gpk
+          cmp c.gpk rust.gpk && echo "Archive bytegleich"
+          target/release/gpk x c.gpk aus-rust && diff -r baum aus-rust
+          legacy-c/gpk/gpk x rust.gpk aus-c && diff -r baum aus-c
+
+      - name: Linux-Programm hochladen
         uses: actions/upload-artifact@v4
         with:
           name: gpk-linux-x86_64
-          path: |
-            gpk/gpk
-            bench
+          path: target/release/gpk
 
   windows-exe:
     # Keine Windows-VM: Cross-Compiling mit MinGW-w64 und Test per Wine auf Ubuntu
@@ -63,49 +86,61 @@ jobs:
     env:
       WINEDEBUG: -all
       WINEPREFIX: ${{ github.workspace }}/.wine
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: wine
     steps:
       - uses: actions/checkout@v4
+
+      - name: Rust-Werkzeuge mit Windows-Ziel
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu
+          rustup default stable
 
       - name: Abhängigkeiten installieren
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc zlib1g-dev liblzma-dev gcc-mingw-w64-x86-64 libz-mingw-w64-dev wine wine64
+          sudo apt-get install -y gcc-mingw-w64-x86-64 wine wine64
 
-      - name: gpk.exe bauen (statisch, ohne DLL-Abhängigkeiten)
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ hashFiles('Cargo.lock') }}
+
+      - name: gpk.exe bauen (statisch, ohne DLL-Abhängigkeiten außer Windows-Systembibliotheken)
         run: |
-          make -C gpk windows
-          x86_64-w64-mingw32-objdump -p gpk/gpk.exe | grep "DLL Name"
+          cargo build --release --target x86_64-pc-windows-gnu
+          x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/gpk.exe | grep "DLL Name"
 
       - name: Linux-gpk als Gegenstück bauen
-        run: make -C gpk gpk
+        run: cargo build --release
 
       - name: Wine vorbereiten
         run: wineboot --init && wineserver -w
 
-      - name: Filter-Roundtrip-Test unter Wine
-        run: |
-          make -C gpk tests/filter_roundtrip.exe
-          wine gpk/tests/filter_roundtrip.exe
+      - name: Unit-Tests unter Wine
+        run: cargo test --release --target x86_64-pc-windows-gnu --lib
 
       - name: GPK-Rauchtest unter Wine
-        run: python3 ci/smoke_test.py gpk/gpk.exe --wine
+        run: python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine
 
       - name: Systemwechsel Linux -> Windows
         run: |
-          python3 ci/smoke_test.py gpk/gpk --cross-pack linux.gpk
-          python3 ci/smoke_test.py gpk/gpk.exe --wine --cross-extract linux.gpk
+          python3 ci/smoke_test.py target/release/gpk --cross-pack linux.gpk
+          python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine --cross-extract linux.gpk
 
       - name: Systemwechsel Windows -> Linux
         run: |
-          python3 ci/smoke_test.py gpk/gpk.exe --wine --cross-pack windows.gpk
-          python3 ci/smoke_test.py gpk/gpk --cross-extract windows.gpk
+          python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine --cross-pack windows.gpk
+          python3 ci/smoke_test.py target/release/gpk --cross-extract windows.gpk
 
       - name: gpk.exe hochladen
         uses: actions/upload-artifact@v4
         with:
           name: gpk-windows-x86_64
-          path: gpk/gpk.exe
+          path: target/x86_64-pc-windows-gnu/release/gpk.exe
 
   release:
     name: Release-Dateien veröffentlichen
@@ -129,9 +164,9 @@ jobs:
       - name: Release-Pakete schnüren
         run: |
           mkdir -p dist/gpk-$TAG-linux-x86_64 dist/gpk-$TAG-windows-x86_64
-          install -m 755 artefakte/gpk-linux-x86_64/gpk/gpk dist/gpk-$TAG-linux-x86_64/gpk
+          install -m 755 artefakte/gpk-linux-x86_64/gpk dist/gpk-$TAG-linux-x86_64/gpk
           cp artefakte/gpk-windows-x86_64/gpk.exe dist/gpk-$TAG-windows-x86_64/
-          for d in dist/gpk-$TAG-*; do cp README.md "$d/README.md"; cp gpk/README.md "$d/GPK.md"; done
+          for d in dist/gpk-$TAG-*; do cp README.md "$d/README.md"; cp docs/GPK.md "$d/GPK.md"; done
           cd dist
           tar -czf gpk-$TAG-linux-x86_64.tar.gz gpk-$TAG-linux-x86_64
           zip -qr gpk-$TAG-windows-x86_64.zip gpk-$TAG-windows-x86_64

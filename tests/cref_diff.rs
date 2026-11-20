@@ -44,7 +44,7 @@ fn filters_identisch_zu_c() {
         let n = (r.next() % 30000) as usize;
         let data = test_data(&mut r, n);
         let f = random_spec(&mut r);
-        let off = if r.next() % 3 == 0 { 0 } else { r.next() as u64 * 13 };
+        let off = if r.next().is_multiple_of(3) { 0 } else { r.next() as u64 * 13 };
         let mut rust = vec![0u8; n];
         filters::encode(&f, &data, &mut rust, off);
         let mut c = vec![0u8; n];
@@ -59,7 +59,8 @@ fn filters_identisch_zu_c() {
 }
 
 fn mixed_data(r: &mut Rng, n: usize) -> Vec<u8> {
-    let words: [&[u8]; 6] = [b"Drache ", b"Schwert ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\xE8\x10\x20\x00\x00", b"func() {\n    return 1;\n}\n"];
+    let words: [&[u8]; 6] =
+        [b"Drache ", b"Schwert ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\xE8\x10\x20\x00\x00", b"func() {\n    return 1;\n}\n"];
     let mut v = Vec::with_capacity(n);
     let noise = r.next() % 3;
     while v.len() < n {
@@ -104,8 +105,15 @@ fn lzrc_identisch_zu_c() {
         let d = if case % 4 == 3 { test_data(&mut r, n) } else { mixed_data(&mut r, n) };
         let level = [2, 5, 7, 9][case % 4];
         let mut p = gpk::lzrc::Params::level(level);
-        if case % 3 == 1 { p.lc = 4; p.pb = 0; }
-        if case % 5 == 2 { p.lc = 0; p.lp = 2; p.pb = 2; }
+        if case % 3 == 1 {
+            p.lc = 4;
+            p.pb = 0;
+        }
+        if case % 5 == 2 {
+            p.lc = 0;
+            p.lp = 2;
+            p.pb = 2;
+        }
         let rust = gpk::lzrc::compress(&d, &p);
         let cp = CLzrcParams { lc: p.lc as i32, lp: p.lp as i32, pb: p.pb as i32, depth: p.depth as i32, nice: p.nice as i32 };
         let cap = unsafe { lzrc_bound(n) };
@@ -159,13 +167,19 @@ fn pxc_identisch_zu_c() {
             .map(|i| match it % 4 {
                 0 => r.next() as u8,
                 1 => ((i / ch) as u32 % w * 3 + r.next() % 7) as u8,
-                2 => if (i / 41) & 1 == 1 { 250 } else { 3 },
+                2 => {
+                    if (i / 41) & 1 == 1 {
+                        250
+                    } else {
+                        3
+                    }
+                }
                 _ => ((i % 7) * 30 + (r.next() % 3) as usize) as u8,
             })
             .collect();
         let rust = gpk::pxc::encode(&px, w, h, ch).unwrap();
         let mut cn = 0usize;
-        let c = take(unsafe { pxc_encode(px.as_ptr(), w, h, ch as i32, &mut cn) }, cn).unwrap();
+        let c = unsafe { take(pxc_encode(px.as_ptr(), w, h, ch as i32, &mut cn), cn) }.unwrap();
         assert!(rust == c, "PXC weicht ab: {it} ({w}x{h}x{ch})");
         let mut out = vec![0u8; n];
         assert!(gpk::pxc::decode(&c, &mut out, w, h, ch));
@@ -173,14 +187,15 @@ fn pxc_identisch_zu_c() {
     }
 }
 
-/// Echte PNGs: aus dem Test-Build (falls vorhanden) und aus dem System
+/// Echte PNGs: aus GPK_PNG_DIR (CI erzeugt sie mit Pillow) und aus dem System (falls vorhanden)
 fn real_pngs() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
-    for dir in ["/home/user/gamecomp/gpk/testbuild/MyGame/MyGame_Data/UI", "/usr/share/icons/hicolor/48x48/apps", "/usr/share/icons/hicolor/256x256/apps", "/usr/share/pixmaps"] {
+    let extra = std::env::var("GPK_PNG_DIR").unwrap_or_default();
+    for dir in [extra.as_str(), "/usr/share/icons/hicolor/48x48/apps", "/usr/share/icons/hicolor/256x256/apps", "/usr/share/pixmaps"] {
         if let Ok(rd) = std::fs::read_dir(dir) {
             let mut f: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
             f.sort();
-            v.extend(f.into_iter().take(15));
+            v.extend(f.into_iter().take(if dir == extra { usize::MAX } else { 15 }));
         }
     }
     v
@@ -195,7 +210,7 @@ fn pngx_identisch_zu_c() {
         for mode in [1u32, 2] {
             let rust = gpk::pngx::forward(&png, mode);
             let mut tn = 0usize;
-            let c = take(unsafe { pngx_forward_mode(png.as_ptr(), png.len(), mode as i32, &mut tn) }, tn);
+            let c = unsafe { take(pngx_forward_mode(png.as_ptr(), png.len(), mode as i32, &mut tn), tn) };
             assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {} Modus {mode}", f.display());
             if let (Some(rv), Some(cv)) = (&rust, &c) {
                 assert!(rv == cv, "PNGX weicht ab: {} Modus {mode}", f.display());
@@ -214,26 +229,26 @@ fn pngx_identisch_zu_c() {
 
 #[test]
 fn jpgx_identisch_zu_c() {
-    // Testsatz aus der JPEG-Entwicklung (falls vorhanden) + Go-Testdaten
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    for dir in ["/tmp/claude-0/-home-user-gpk/dfd70ffa-0d0f-5554-bc5a-49a1ae02f184/scratchpad/jpgtest", "/usr/local/go1.25.1/src/image/testdata"] {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            files.extend(rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jpg" || e == "jpeg")));
-        }
+    // Eingebettete Beispiele + optional weitere Testbilder aus GPK_JPEG_DIR (CI erzeugt sie mit Pillow)
+    let mut files: Vec<(String, Vec<u8>)> =
+        gpk::testutil::jpeg_samples().into_iter().enumerate().map(|(i, d)| (format!("Beispiel {i}"), d)).collect();
+    if let Ok(dir) = std::env::var("GPK_JPEG_DIR") {
+        let mut paths: Vec<_> = std::fs::read_dir(&dir).expect("GPK_JPEG_DIR nicht lesbar").flatten().map(|e| e.path()).collect();
+        paths.retain(|p| p.extension().is_some_and(|e| e == "jpg" || e == "jpeg"));
+        paths.sort();
+        files.extend(paths.into_iter().map(|p| (p.display().to_string(), std::fs::read(&p).unwrap())));
     }
-    files.sort();
     let (mut ok, mut rejected) = (0, 0);
-    for f in &files {
-        let jpg = std::fs::read(f).unwrap();
-        let rust = gpk::jpgx::forward(&jpg);
+    for (f, jpg) in &files {
+        let rust = gpk::jpgx::forward(jpg);
         let mut tn = 0usize;
-        let c = take(unsafe { jpgx_forward(jpg.as_ptr(), jpg.len(), &mut tn) }, tn);
-        assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {}", f.display());
+        let c = unsafe { take(jpgx_forward(jpg.as_ptr(), jpg.len(), &mut tn), tn) };
+        assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {f}");
         match (&rust, &c) {
             (Some(rv), Some(cv)) => {
-                assert!(rv == cv, "JPGX weicht ab: {}", f.display());
+                assert!(rv == cv, "JPGX weicht ab: {f}");
                 let mut out = vec![0u8; jpg.len()];
-                assert!(gpk::jpgx::inverse(cv, &mut out) && out == jpg);
+                assert!(gpk::jpgx::inverse(cv, &mut out) && &out == jpg);
                 ok += 1;
             }
             _ => rejected += 1,

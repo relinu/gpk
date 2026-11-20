@@ -1,12 +1,13 @@
 # Kompression für Computerspiele
 
-Zwei Kompressoren in C, jeweils mit Benchmarks gegen gängige Verfahren
-(LZ4, zlib, zstd, bzip2, xz):
+**GPK** packt einen kompletten Spiel-Build für den Download: Deduplizierung,
+dateitypspezifische Filter (x86-Code, DDS-Texturen, Meshes, Audio), verlustfreie PNG- und
+JPEG-Rekompression, eigene Kerne LZRC (LZ) und TCM (Context Mixing für Text), paralleles
+Entpacken mit CRC-Prüfung. Details: [docs/GPK.md](docs/GPK.md).
 
-| Projekt | Zweck | Doku |
-|---|---|---|
-| **GPK** (`gpk/`) | Packt einen kompletten Spiel-Build für den Download: Deduplizierung, dateitypspezifische Filter (x86-Code, DDS-Texturen, Meshes, Audio), verlustfreie PNG- und JPEG-Rekompression, eigene Kerne LZRC (LZ) und TCM (Context Mixing für Text), paralleles Entpacken mit CRC-Prüfung | [gpk/README.md](gpk/README.md) |
-| **GLZ** (Wurzelordner) | Schneller Asset-Kompressor fürs Laden zur Laufzeit (unabhängige 1-MiB-Blöcke, Huffman) | [GLZ.md](GLZ.md) |
+Das Programm ist in **Rust** geschrieben (`src/`). Die frühere C-Version liegt als Referenz
+in `legacy-c/` (inkl. GLZ, dem Laufzeit-Asset-Kompressor, siehe [docs/GLZ.md](docs/GLZ.md)).
+Rust- und C-Version erzeugen **bytegleiche Archive**; das prüft die CI bei jedem Push.
 
 ## Kernergebnis (Test-Build 327,6 MB inkl. JPEGs)
 
@@ -18,45 +19,78 @@ Zwei Kompressoren in C, jeweils mit Benchmarks gegen gängige Verfahren
 | GPK v3 `--no-cm` | 126,3 MB | −61,5 % | 100,6 s | 4,1 s |
 | **GPK v3** | **125,5 MB** | **−61,7 %** | 118,5 s | 9,9 s |
 
-Details, Ablationen und Abwägungen: [gpk/README.md](gpk/README.md).
+Details, Ablationen und Abwägungen: [docs/GPK.md](docs/GPK.md) und [docs/vergleich.md](docs/vergleich.md).
 Der Test-Build ist teilweise synthetisch (Code, Skripte, Schriften sind echte Dateien).
+
+## Rust- vs. C-Version (Test-Build 308 MB, 4 Threads)
+
+| | C (`legacy-c/`) | Rust |
+|---|---:|---:|
+| Archiv | 120,27 MB | 120,27 MB (bytegleich) |
+| Packen | 104,3 s, 1,50 GB RAM | 104,7 s, 1,47 GB RAM |
+| Entpacken | 8,0 s, 0,50 GB RAM | 9,1 s, 0,45 GB RAM |
 
 ## Schnellstart
 
 ```bash
-cd gpk && make && make test
-python3 make_build.py testbuild/MyGame            # Test-Build erzeugen (~330 MB, JPEGs brauchen Pillow)
-./gpk c -t 4 testbuild/MyGame spiel.gpk
-./gpk x -t 4 spiel.gpk entpackt
-./bench_build.sh testbuild/MyGame arbeit && python3 compare_table.py arbeit/results.csv testbuild/MyGame
+cargo build --release
+python3 tools/make_build.py testbuild/MyGame        # Test-Build erzeugen (~330 MB, JPEGs brauchen Pillow)
+target/release/gpk c -t 4 testbuild/MyGame spiel.gpk
+target/release/gpk x -t 4 spiel.gpk entpackt
+target/release/gpk l spiel.gpk
 ```
 
-Benötigt: gcc, zlib, liblzma, bzip2, Python 3 mit NumPy; für den Vergleich
-zusätzlich `xz`, `zip`/`unzip` und die zstd-/LZ4-Laufzeitbibliotheken.
+Benötigt: Rust (stable) und einen C-Compiler (für die statisch eingebundenen zlib und liblzma).
+Optionen: `gpk` ohne Argumente zeigt die Hilfe; `--max-ram GB` begrenzt den Speicherbedarf.
+
+## Sicherheit
+
+- Der gesamte Code ist sicheres Rust; die einzige `unsafe`-Stelle ist die Anbindung an zlib
+  (`src/zlib.rs`), die für die bitgenaue PNG-Rekompression exakt dieselbe zlib wie beim Packen braucht.
+- Archive werden vor dem Entpacken vollständig geprüft: Pfade (keine absoluten Pfade, kein `..`,
+  unter Windows kein `\` oder `:`), Größen und Grenzen aller Blöcke und Stücke. Beschädigte Daten
+  führen zu einer Fehlermeldung, nie zu einem Absturz oder Schreiben außerhalb des Zielordners;
+  jede Datei wird per CRC32 geprüft.
+- Absolute Symlinks werden beim Entpacken übersprungen.
+
+## Tests
+
+```bash
+cargo test --release                       # Unit-Tests (Roundtrips, beschädigte Daten)
+cargo test --release --features cref       # zusätzlich Differenztests: Rust == C, Byte für Byte
+python3 ci/smoke_test.py target/release/gpk
+```
+
+Die Differenztests übersetzen die C-Module aus `legacy-c/` mit und vergleichen jede Stufe
+(Filter, GLZ, LZRC, TCM, Pixel-Coder, PNG, JPEG) mit der Rust-Version.
+Mit `GPK_PNG_DIR`/`GPK_JPEG_DIR` lassen sich weitere Testbilder einbinden
+(`tools/gen_testimages.py` erzeugt welche, braucht Pillow).
 
 ## Windows
 
-`gpk.exe` wird unter Linux per Cross-Compiling gebaut (MinGW-w64, statisch gelinkt,
-nur Windows-System-DLLs nötig):
+`gpk.exe` wird unter Linux per Cross-Compiling gebaut (keine Windows-VM nötig):
 
 ```bash
-sudo apt-get install gcc-mingw-w64-x86-64 libz-mingw-w64-dev
-make -C gpk windows        # erzeugt gpk/gpk.exe
+rustup target add x86_64-pc-windows-gnu
+sudo apt-get install gcc-mingw-w64-x86-64
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-Archive sind zwischen Linux und Windows austauschbar. Unterschiede der `.exe`:
-Option `--xz` fehlt (ohne liblzma gebaut; Standard-Kern LZRC ist enthalten),
-Symlinks werden beim Entpacken übersprungen, Unix-Rechte nicht gesetzt.
-Dateinamen sollten ASCII sein (die `.exe` nutzt die ANSI-Dateisystem-API).
+Gegenüber der C-Version hat die Rust-`.exe` denselben Funktionsumfang wie unter Linux
+(auch `--xz`) und unterstützt Unicode-Dateinamen. Archive sind zwischen Linux und Windows
+austauschbar; unter Windows werden Symlinks übersprungen und Unix-Rechte nicht gesetzt.
 
 ## CI
 
-`.github/workflows/build.yml` läuft bei jedem Push auf `main` und bei Pull Requests,
+`.github/workflows/build.yml` läuft bei jedem Push auf `main` und `rust-port` und bei Pull Requests,
 ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
 
-- **Linux (gcc und clang):** Bauen, Filter- und GLZ-Fuzztests mit ASan/UBSan,
-  GPK-Rauchtest (packen, entpacken, bitgenau vergleichen, beschädigtes Archiv muss abgelehnt werden)
-- **Windows-.exe:** Cross-Build mit MinGW-w64, Tests der `.exe` unter Wine,
+- **Linux:** `cargo fmt`/`clippy`, Tests und Differenztests gegen die C-Referenz, Tests im
+  Debug-Modus (Überlaufprüfungen), Rauchtest (packen, entpacken, bitgenau vergleichen,
+  beschädigtes Archiv muss abgelehnt werden), Bytegleichheit der Archive C ↔ Rust und
+  Kreuz-Entpacken
+- **Windows-.exe:** Cross-Build, Unit- und Rauchtests der `.exe` unter Wine,
   Archiv-Austausch Linux → Windows und Windows → Linux
 - Die fertigen Programme (`gpk`, `gpk.exe`) stehen als Artefakte am jeweiligen Lauf.
 
@@ -65,7 +99,7 @@ ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
 Fertige Programme erscheinen automatisch unter *Releases*, sobald alle Builds und Tests grün sind:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0     # legt den Release an und hängt die Dateien an
+git tag v0.4.0 && git push origin v0.4.0     # legt den Release an und hängt die Dateien an
 ```
 
 Alternativ einen Release in der GitHub-Oberfläche veröffentlichen – die Pipeline hängt die

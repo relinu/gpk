@@ -381,7 +381,15 @@ mod tests {
             let n = (r.next() % 20000) as usize;
             let off = if r.next() % 4 == 0 { 0 } else { r.next() as u64 * 7 };
             let data: Vec<u8> = (0..n)
-                .map(|_| if r.next() % 3 == 0 { 0xE8 | (r.next() & 1) as u8 } else if r.next() % 2 == 1 { 0xFF } else { r.next() as u8 })
+                .map(|_| {
+                    if r.next() % 3 == 0 {
+                        0xE8 | (r.next() & 1) as u8
+                    } else if r.next() % 2 == 1 {
+                        0xFF
+                    } else {
+                        r.next() as u8
+                    }
+                })
                 .collect();
             let f = random_spec(&mut r);
             let mut enc = vec![0; n];

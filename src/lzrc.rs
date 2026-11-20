@@ -19,15 +19,27 @@ const PROB_INIT: u16 = 1024;
 const NEXT_LIT: [u8; NSTATES] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5];
 #[inline]
 fn next_match(s: u32) -> u32 {
-    if s < 7 { 7 } else { 10 }
+    if s < 7 {
+        7
+    } else {
+        10
+    }
 }
 #[inline]
 fn next_rep(s: u32) -> u32 {
-    if s < 7 { 8 } else { 11 }
+    if s < 7 {
+        8
+    } else {
+        11
+    }
 }
 #[inline]
 fn next_shortrep(s: u32) -> u32 {
-    if s < 7 { 9 } else { 11 }
+    if s < 7 {
+        9
+    } else {
+        11
+    }
 }
 
 /// Parameter: Literal-Kontextbits, Literal-Positionsbits, Positionsbits, Suchtiefe, "nice"-Länge.
@@ -489,7 +501,11 @@ impl Prices {
     }
     #[inline]
     fn pbit(&self, p: u16, b: u32) -> u32 {
-        if b != 0 { self.p1(p) } else { self.p0(p) }
+        if b != 0 {
+            self.p1(p)
+        } else {
+            self.p0(p)
+        }
     }
     fn tree(&self, probs: &[u16], nb: u32, sym: u32) -> u32 {
         let (mut m, mut s) = (1usize, 0);
@@ -921,7 +937,13 @@ impl<'a> Enc<'a> {
                     while ll <= l {
                         let pr = base + self.pr.replen[ps][ll as usize];
                         Self::relax(&mut self.nodes, i + ll, pr, i, K_REP0 + r as u8, ll, d);
-                        ll = if ll < DENSE_LEN || ll == l { ll + 1 } else if ll + 16 < l { ll + 16 } else { l };
+                        ll = if ll < DENSE_LEN || ll == l {
+                            ll + 1
+                        } else if ll + 16 < l {
+                            ll + 16
+                        } else {
+                            l
+                        };
                     }
                     longest = longest.max(l);
                 }
@@ -939,7 +961,13 @@ impl<'a> Enc<'a> {
                         while ll <= ml {
                             let pr = norm_p + self.pr.len[ps][ll as usize] + self.pr.dist(d, ll);
                             Self::relax(&mut self.nodes, i + ll, pr, i, K_MATCH, ll, d);
-                            ll = if ll < DENSE_LEN || ll == ml { ll + 1 } else if ll + 16 < ml { ll + 16 } else { ml };
+                            ll = if ll < DENSE_LEN || ll == ml {
+                                ll + 1
+                            } else if ll + 16 < ml {
+                                ll + 16
+                            } else {
+                                ml
+                            };
                         }
                     }
                     ll = ml + 1;

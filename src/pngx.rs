@@ -26,7 +26,13 @@ fn rd32(p: &[u8], i: usize) -> u32 {
 fn paeth(a: i32, b: i32, c: i32) -> u8 {
     let p = a + b - c;
     let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
-    (if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }) as u8
+    (if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }) as u8
 }
 #[inline]
 fn png_pred(f: u8, cur: &[u8], prior: Option<&[u8]>, i: usize, bpp: usize) -> u8 {

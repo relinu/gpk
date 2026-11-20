@@ -21,7 +21,16 @@ struct Huff {
 }
 impl Default for Huff {
     fn default() -> Self {
-        Huff { present: false, bits: [0; 17], vals: [0; 256], maxcode: [0; 18], valptr: [0; 17], mincode: [0; 17], code: [0; 256], len: [0; 256] }
+        Huff {
+            present: false,
+            bits: [0; 17],
+            vals: [0; 256],
+            maxcode: [0; 18],
+            valptr: [0; 17],
+            mincode: [0; 17],
+            code: [0; 256],
+            len: [0; 256],
+        }
     }
 }
 impl Huff {
@@ -319,7 +328,11 @@ impl<'a> Br<'a> {
 }
 #[inline]
 fn extend(v: i32, s: i32) -> i32 {
-    if s != 0 && v < (1 << (s - 1)) { v - (1 << s) + 1 } else { v }
+    if s != 0 && v < (1 << (s - 1)) {
+        v - (1 << s) + 1
+    } else {
+        v
+    }
 }
 
 fn decode_scan(d: &[u8], j: &mut JInfo) -> Option<usize> {
@@ -566,8 +579,8 @@ impl Model {
 }
 
 const KB: [u8; 64] = [
-    0, 0, 1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
-    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    0, 0, 1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 11,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
 ];
 fn qmag(v: i32) -> usize {
     match v {
@@ -629,7 +642,13 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
             let pl = l_blk.map_or(pa, |l| l[0] as i32);
             let pal = al_blk.map_or(pa, |x| x[0] as i32);
             let (mx, mn) = (pa.max(pl), pa.min(pl));
-            let pred = if pal >= mx { mn } else if pal <= mn { mx } else { pa + pl - pal };
+            let pred = if pal >= mx {
+                mn
+            } else if pal <= mn {
+                mx
+            } else {
+                pa + pl - pal
+            };
             let dq = qmag((pa - pl).abs()).min(7);
             let mut dr = if a.dec { 0 } else { b[0] as i32 - pred };
             if a.bit(&mut m.dz[cls][dq], dr != 0) {
@@ -649,7 +668,13 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
             // Anzahl Nicht-Null-AC
             let na = a_blk.map_or(-1, nzcount);
             let nl = l_blk.map_or(-1, nzcount);
-            let avg = if na < 0 { nl.max(0) } else if nl < 0 { na } else { (na + nl + 1) / 2 };
+            let avg = if na < 0 {
+                nl.max(0)
+            } else if nl < 0 {
+                na
+            } else {
+                (na + nl + 1) / 2
+            };
             let nzq = qnz(avg);
             let nnz_in = if a.dec { 0 } else { nzcount(b) };
             let mut node = 1usize;
@@ -662,7 +687,17 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
             while k < 64 && rem > 0 {
                 let ma = a_blk.map_or(-1, |x| (x[k] as i32).abs());
                 let ml = l_blk.map_or(-1, |x| (x[k] as i32).abs());
-                let mag = if ma < 0 { if ml < 0 { 0 } else { 2 * ml } } else if ml < 0 { 2 * ma } else { ma + ml };
+                let mag = if ma < 0 {
+                    if ml < 0 {
+                        0
+                    } else {
+                        2 * ml
+                    }
+                } else if ml < 0 {
+                    2 * ma
+                } else {
+                    ma + ml
+                };
                 let (mq, kb) = (qmag(mag), KB[k] as usize);
                 let rq = if rem > NRQ as i32 { NRQ - 1 } else { (rem - 1) as usize };
                 if rem > 64 - k as i32 {
@@ -785,16 +820,7 @@ mod tests {
     use crate::testutil::Rng;
 
     /// Beispiel-JPEGs aus der C-Referenz (tests/sample_jpegs.h, mit Pillow erzeugt)
-    pub fn samples() -> Vec<Vec<u8>> {
-        let h = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/legacy-c/gpk/tests/sample_jpegs.h")).unwrap();
-        h.lines()
-            .filter(|l| l.starts_with("static const unsigned char SAMPLE_JPEG"))
-            .map(|l| {
-                let body = &l[l.find('{').unwrap() + 1..l.rfind('}').unwrap()];
-                body.split(',').map(|v| v.trim().parse::<u8>().unwrap()).collect()
-            })
-            .collect()
-    }
+    use crate::testutil::jpeg_samples as samples;
 
     #[test]
     fn roundtrip_samples() {

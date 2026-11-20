@@ -18,3 +18,4 @@ testbuild/
 *.gpk
 *.log
 .wine/
+__pycache__/

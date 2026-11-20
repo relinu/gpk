@@ -4,6 +4,7 @@
   smoke_test.py <gpk-programm> [--wine]                      packen, entpacken, bitgenau vergleichen
   smoke_test.py <gpk-programm> [--wine] --cross-pack A.gpk    deterministischen Baum packen
   smoke_test.py <gpk-programm> [--wine] --cross-extract A.gpk fremdes Archiv entpacken und vergleichen
+  smoke_test.py --make-tree DIR                               nur den Test-Build anlegen (z. B. für Bytegleichheit C/Rust)
 
 --wine: gpk.exe unter Linux per Wine ausführen (Windows-Verhalten: keine Symlinks, keine Unix-Rechte).
 
@@ -46,14 +47,14 @@ def make_tree(root, with_system_files):
                      for i in range(40000))
     write(os.path.join(root, "data", "mesh.bin"), verts)
     # JPEG aus den eingebetteten Testdaten (kein Pillow nötig): größtes Beispiel
-    hdr = open(os.path.join(REPO, "gpk", "tests", "sample_jpegs.h")).read()
+    hdr = open(os.path.join(REPO, "legacy-c", "gpk", "tests", "sample_jpegs.h")).read()
     jpgs = [bytes(int(v) for v in m.group(1).split(",")) for m in re.finditer(r"SAMPLE_JPEG\d\[\d+\] = \{([0-9,]+)\}", hdr)]
     write(os.path.join(root, "data", "ui", "loading.jpg"), max(jpgs, key=len))
     write(os.path.join(root, "data", "leer.txt"), b"")
     os.makedirs(os.path.join(root, "leerer ordner"), exist_ok=True)
-    for name in sorted(os.listdir(os.path.join(REPO, "gpk"))):
+    for name in sorted(os.listdir(os.path.join(REPO, "legacy-c", "gpk"))):
         if name.endswith((".c", ".h")):
-            with open(os.path.join(REPO, "gpk", name), "rb") as f:
+            with open(os.path.join(REPO, "legacy-c", "gpk", name), "rb") as f:
                 src = f.read().replace(b"\r\n", b"\n")      # gleich auf allen Systemen (git autocrlf)
             write(os.path.join(root, "data", "src", name), src)
     write(os.path.join(root, "dlc", "mesh kopie.bin"), verts)   # Duplikat mit Leerzeichen im Namen
@@ -119,11 +120,17 @@ def fail(msg):
 def main():
     global WIN, RUNNER
     ap = argparse.ArgumentParser()
-    ap.add_argument("gpk")
+    ap.add_argument("gpk", nargs="?")
+    ap.add_argument("--make-tree")
     ap.add_argument("--wine", action="store_true")
     ap.add_argument("--cross-pack")
     ap.add_argument("--cross-extract")
     a = ap.parse_args()
+    if a.make_tree:
+        make_tree(os.path.abspath(a.make_tree), True)
+        return
+    if not a.gpk:
+        ap.error("gpk-Programm fehlt")
     if a.wine:
         WIN, RUNNER = True, ["wine"]
     gpk = os.path.abspath(a.gpk)

@@ -14,3 +14,15 @@ impl Rng {
         (0..n).map(|_| self.next() as u8).collect()
     }
 }
+
+/// Die in `legacy-c/gpk/tests/sample_jpegs.h` eingebetteten Beispiel-JPEGs.
+pub fn jpeg_samples() -> Vec<Vec<u8>> {
+    let h = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/legacy-c/gpk/tests/sample_jpegs.h")).unwrap();
+    h.lines()
+        .filter(|l| l.starts_with("static const unsigned char SAMPLE_JPEG"))
+        .map(|l| {
+            let body = &l[l.find('{').unwrap() + 1..l.rfind('}').unwrap()];
+            body.split(',').map(|v| v.trim().parse::<u8>().unwrap()).collect()
+        })
+        .collect()
+}

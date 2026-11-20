@@ -119,11 +119,7 @@ struct Chan {
 }
 impl Chan {
     fn new(w: usize, h: usize) -> Self {
-        Chan {
-            pl: vec![0; w * h],
-            pe: std::array::from_fn(|_| [vec![0; w], vec![0; w]]),
-            re: [vec![0; w], vec![0; w]],
-        }
+        Chan { pl: vec![0; w * h], pe: std::array::from_fn(|_| [vec![0; w], vec![0; w]]), re: [vec![0; w], vec![0; w]] }
     }
     fn next_row(&mut self) {
         for p in self.pe.iter_mut() {
@@ -163,7 +159,13 @@ struct Ctx {
 fn context(m: &Model, c: &Chan, w: usize, x: usize, y: usize, k: usize, r0mag: i32) -> Ctx {
     let row = y * w;
     let px = |i: usize| c.pl[i] as i32;
-    let wv = if x > 0 { px(row + x - 1) } else if y > 0 { px(row - w + x) } else { 0 };
+    let wv = if x > 0 {
+        px(row + x - 1)
+    } else if y > 0 {
+        px(row - w + x)
+    } else {
+        0
+    };
     let n = if y > 0 { px(row - w + x) } else { wv };
     let nw = if x > 0 && y > 0 { px(row - w + x - 1) } else { n };
     let ne = if y > 0 && x + 1 < w { px(row - w + x + 1) } else { n };
@@ -261,7 +263,11 @@ fn decode_res(a: &mut Dec, m: &mut Model, k: usize, o: &Ctx) -> i32 {
     for b in (0..e).rev() {
         v = (v << 1) | a.bit(&mut m.mant[k][o.eq][e][if b == e - 1 { 0 } else { 1 }]) as i32;
     }
-    if neg { -v } else { v }
+    if neg {
+        -v
+    } else {
+        v
+    }
 }
 
 fn encode_ct(px: &[u8], w: usize, h: usize, ch: usize, ct: bool) -> Vec<u8> {
@@ -388,7 +394,13 @@ mod tests {
                 .map(|i| match it % 3 {
                     0 => r.next() as u8,
                     1 => ((i / ch) as u32 % w * 3 + r.next() % 5) as u8,
-                    _ => if (i / 37) & 1 == 1 { 255 } else { 0 },
+                    _ => {
+                        if (i / 37) & 1 == 1 {
+                            255
+                        } else {
+                            0
+                        }
+                    }
                 })
                 .collect();
             let c = encode(&px, w, h, ch).unwrap();

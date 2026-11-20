@@ -5,11 +5,11 @@ Download. Ziel: möglichst kleine Downloads, bitgenaue Wiederherstellung
 (CRC32 je Datei), paralleles Entpacken.
 
 ```bash
-make                                   # baut gpk und zstdtool
-./gpk c -t 4 <build-ordner> spiel.gpk  # packen
-./gpk x -t 4 spiel.gpk <ziel>          # entpacken (prüft alle CRCs)
-./gpk l spiel.gpk                      # Inhalt und gewählte Filter anzeigen
-make test                              # Fuzztests (Filter, Text-Kern, Pixel-Coder, JPEG) mit ASan/UBSan
+cargo build --release                  # baut target/release/gpk
+gpk c -t 4 <build-ordner> spiel.gpk    # packen
+gpk x -t 4 spiel.gpk <ziel>            # entpacken (prüft alle CRCs)
+gpk l spiel.gpk                        # Inhalt und gewählte Filter anzeigen
+cargo test --release --features cref   # Tests + Differenztests gegen die C-Referenz
 ```
 
 ## Speicherbedarf
@@ -19,7 +19,7 @@ Der RAM-Bedarf hängt **nicht** von der Build-Größe ab:
 - Fertige Blöcke werden sofort ins Archiv geschrieben, in fester Reihenfolge
   (Archive sind bei gleicher Eingabe bytegleich). Die Threads arbeiten höchstens
   `Threads + 2` Blöcke voraus.
-- Dateien werden nur für den jeweiligen Arbeitsschritt eingeblendet.
+- Dateien werden nur bereichsweise gelesen, jeweils für den aktuellen Arbeitsschritt.
 - Umgewandelte PNG-/JPEG-Daten werden in `<archiv>.auslagerung.tmp` neben dem Archiv
   ausgelagert und am Ende gelöscht.
 - Beim Entpacken liest jeder Thread nur den Block, den er gerade entpackt.
@@ -44,7 +44,7 @@ machen das Packen langsamer bzw. das Archiv etwas größer.
      (Precomp/Preflate-Prinzip). Danach je Bild das Kleinere von zwei Varianten:
      Rohdaten für LZRC oder **Pixel-Coder PXC** (Zeilenfilter entfernen, gewichtete
      Mischung von 6 Prädiktoren, optionale Farbtransformation, Kontext-Arithmetikkodierung)
-   - **JPEG** (`jpgx.c`): Baseline/Extended mit Huffman, 1–4 Komponenten, beliebige
+   - **JPEG** (`src/jpgx.rs`): Baseline/Extended mit Huffman, 1–4 Komponenten, beliebige
      Abtastung, Restart-Marker. Scan zu DCT-Koeffizienten dekodieren, mit Kontextmodell
      (Nachbarblöcke) neu kodieren, beim Entpacken Huffman-Strom exakt neu erzeugen.
      Progressive/arithmetische JPEGs bleiben unverändert.
