@@ -1,4 +1,4 @@
-/* lc/lp/pb-Raster auf einer (gefilterten) Datei: param_lab <datei> [wpred-stride] */
+/* lc/lp/pb grid on a (filtered) file: param_lab <file> [wpred-stride] */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

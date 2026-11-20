@@ -1,4 +1,4 @@
-/* TCM – siehe tcm.h */
+/* TCM – see tcm.h */
 #include "tcm.h"
 #include <stdlib.h>
 #include <string.h>
@@ -14,25 +14,25 @@
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef int32_t i32; typedef uint64_t u64;
 
 #ifndef TCM_EXTRA
-#define TCM_EXTRA  1            /* zusätzliche Modelle: Spalte/Einrückung, Sparse */
+#define TCM_EXTRA  1            /* additional models: column/indentation, sparse */
 #endif
-#define NHASH      (6 + TCM_EXTRA)  /* gehashte Modelle: o1 o2 o3 o4 o6 Wort [Spalte Sparse] */
+#define NHASH      (6 + TCM_EXTRA)  /* hashed models: o1 o2 o3 o4 o6 word [column sparse] */
 #define NIN        (NHASH + 3)      /* + o0, Match, Bias */
 #ifndef HBITS
-#define HBITS      22           /* Einträge je gehashter Tabelle (2^22 x 4 Byte = 16 MiB) */
+#define HBITS      22           /* entries per hashed table (2^22 x 4 bytes = 16 MiB) */
 #endif
 #ifndef TCM_LR
-#define TCM_LR     2            /* Lernrate der Mischnetze */
+#define TCM_LR     2            /* learning rate of the mixers */
 #endif
-#define MMBITS     20           /* Match-Modell: Hash der letzten 6 Bytes -> Position */
+#define MMBITS     20           /* match model: hash of the last 6 bytes -> position */
 #define MINMATCH   6
 
-/* ---------------- Logistik-Hilfen ---------------- */
+/* ---------------- Logistic helpers ---------------- */
 static int16_t STRETCH[4096];
 static int tables_ready;
-/* squash(d) = 4096 / (1 + e^(-d/256)), nur mit Ganzzahlen (Stützstellen + Interpolation):
- * Encoder und Decoder müssen auf jeder Plattform bitgleich rechnen – Gleitkomma
- * aus unterschiedlichen Mathe-Bibliotheken (glibc, msvcrt) wäre dafür nicht sicher. */
+/* squash(d) = 4096 / (1 + e^(-d/256)), with integers only (support points + interpolation):
+ * encoder and decoder must compute bit-identically on every platform – floating point
+ * from different math libraries (glibc, msvcrt) would not be safe for that. */
 static int squash(int d) {
     static const int T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                               2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
@@ -45,17 +45,17 @@ static int squash(int d) {
 static void init_tables(void) {
     if (tables_ready) return;
     int pi = 0;
-    for (int x = -2047; x <= 2047; x++) {          /* Umkehrfunktion von squash */
+    for (int x = -2047; x <= 2047; x++) {          /* inverse function of squash */
         int v = squash(x);
         for (int j = pi; j <= v; j++) STRETCH[j] = (int16_t)x;
         pi = v + 1;
     }
     for (int j = pi; j < 4096; j++) STRETCH[j] = 2047;
-    tables_ready = 1;                               /* idempotent, Rennen harmlos */
+    tables_ready = 1;                               /* idempotent, races are harmless */
 }
 
-/* ---------------- Zähler mit zählerabhängiger Lernrate ----------------
- * Eintrag: obere 22 Bit Wahrscheinlichkeit (für 1), untere 10 Bit Anzahl. */
+/* ---------------- Counters with a count-dependent learning rate ----------------
+ * Entry: upper 22 bits probability (of a 1), lower 10 bits count. */
 static int DT[1024];
 #ifndef SM_LIMIT
 #define SM_LIMIT 255
@@ -69,7 +69,7 @@ static inline void sm_update(u32 *e, int bit) {
     *e = ((u32)p << 10) | (u32)n;
 }
 
-/* ---------------- APM (Nachkorrektur) ---------------- */
+/* ---------------- APM (refinement) ---------------- */
 typedef struct { u16 *t; int idx; } APM;
 static void apm_init(APM *a, int n) {
     a->t = malloc(sizeof(u16) * (size_t)n * 33);
@@ -79,7 +79,7 @@ static void apm_init(APM *a, int n) {
 }
 static inline int apm_p(APM *a, int pr, int cx) {
     int s = STRETCH[pr] + 2048, lo = s >> 7, w = s & 127;
-    a->idx = cx * 33 + lo + (w >> 6);               /* Eintrag mit größerem Gewicht wird trainiert */
+    a->idx = cx * 33 + lo + (w >> 6);               /* the entry with the larger weight is trained */
     return (a->t[cx * 33 + lo] * (128 - w) + a->t[cx * 33 + lo + 1] * w) >> 11;
 }
 static inline void apm_update(APM *a, int bit) {
@@ -87,26 +87,26 @@ static inline void apm_update(APM *a, int bit) {
     a->t[a->idx] += (u16)((g - a->t[a->idx]) >> 6);
 }
 
-/* ---------------- Modellzustand ---------------- */
+/* ---------------- Model state ---------------- */
 typedef struct {
-    u32 *ht[NHASH];             /* gehashte Tabellen, in 16er-Slots (eine Cache-Zeile) */
-    u32 *slot[NHASH];           /* aktueller Slot je Modell */
-    u32 hctx[NHASH];            /* Kontext-Hash je Modell (an Bytegrenze berechnet) */
-    u32 o0[256 * 16];           /* Ordnung 0: direkt, [c0-Nibble-Slot] */
+    u32 *ht[NHASH];             /* hashed tables, in slots of 16 (one cache line) */
+    u32 *slot[NHASH];           /* current slot per model */
+    u32 hctx[NHASH];            /* context hash per model (computed at byte boundaries) */
+    u32 o0[256 * 16];           /* order 0: direct, [c0 nibble slot] */
     u32 *o0slot;
-    u32 mm_sm[64 * 2];          /* Match-Modell: Zähler nach (Länge, erwartetes Bit) */
-    u32 *mmt; u32 mptr, mlen;   /* Match-Hash-Tabelle, Zeiger, Länge */
-    i32 w[256][NIN];            /* Mixer 1: Gewichte je c0 */
-    i32 w2[256][NIN];           /* Mixer 2: Gewichte je Vorgänger-Byte */
+    u32 mm_sm[64 * 2];          /* match model: counters by (length, expected bit) */
+    u32 *mmt; u32 mptr, mlen;   /* match hash table, pointer, length */
+    i32 w[256][NIN];            /* mixer 1: weights per c0 */
+    i32 w2[256][NIN];           /* mixer 2: weights per previous byte */
     int pm1, pm2;
-    u32 col, linestart, above;  /* Spalte, Zeilenanfang, Zeichen darüber */
-    int x[NIN];                 /* Mixer-Eingaben */
-    int pr, pmix;               /* finale und gemischte Wahrscheinlichkeit */
+    u32 col, linestart, above;  /* column, line start, character above */
+    int x[NIN];                 /* mixer inputs */
+    int pr, pmix;               /* final and mixed probability */
     APM a1, a2;
-    u32 c0, c4, word0, word1;   /* Teilbyte, letzte 4 Bytes, Wort-Hashes */
-    int bitpos, jn;             /* Bit im Byte, Index im Nibble-Slot */
-    int mm_expect, mm_idx;      /* erwartetes Bit des Match-Modells, Zählerindex */
-    const u8 *buf; u32 pos;     /* bisher verarbeitete Daten (für das Match-Modell) */
+    u32 c0, c4, word0, word1;   /* partial byte, last 4 bytes, word hashes */
+    int bitpos, jn;             /* bit in the byte, index in the nibble slot */
+    int mm_expect, mm_idx;      /* expected bit of the match model, counter index */
+    const u8 *buf; u32 pos;     /* data processed so far (for the match model) */
 } Model;
 
 static inline u32 hash2(u32 a, u32 b) { u32 h = a * 0x9E3779B1u ^ b * 0x85EBCA77u; h ^= h >> 15; h *= 0xC2B2AE3Du; return h ^ (h >> 13); }
@@ -114,11 +114,11 @@ static inline u32 hash2(u32 a, u32 b) { u32 h = a * 0x9E3779B1u ^ b * 0x85EBCA77
 static int model_init(Model *m, const u8 *buf) {
     memset(m, 0, sizeof *m);
     init_tables();
-    for (int i = 0; i < 1024; i++) DT[i] = (65536 * 2) / (2 * i + 3);   /* ganzzahlig: plattformunabhängig */
+    for (int i = 0; i < 1024; i++) DT[i] = (65536 * 2) / (2 * i + 3);   /* integer: platform-independent */
     for (int k = 0; k < NHASH; k++) {
         m->ht[k] = tcm_aligned_alloc(64, sizeof(u32) << HBITS);
         if (!m->ht[k]) return 0;
-        memset(m->ht[k], 0, sizeof(u32) << HBITS);   /* Prüfsumme 0 = leerer Slot */
+        memset(m->ht[k], 0, sizeof(u32) << HBITS);   /* check value 0 = empty slot */
     }
     for (int i = 0; i < 256 * 16; i++) m->o0[i] = 1u << 31;
     for (int i = 0; i < 128; i++) m->mm_sm[i] = 1u << 31;
@@ -134,22 +134,22 @@ static void model_free(Model *m) {
     free(m->mmt); free(m->a1.t); free(m->a2.t);
 }
 
-/* Slots für das aktuelle Nibble wählen (an Bit 0 und Bit 4).
- * Jeder Slot (16 x 4 Byte = eine Cache-Zeile) trägt in Eintrag 0 eine Prüfsumme;
- * Einträge 1..15 sind die Zähler des Nibble-Baums. Zwei mögliche Slots je Kontext:
- * passt keiner, wird der mit weniger Erfahrung (Zähler im Wurzeleintrag) ersetzt. */
+/* Choose the slots for the current nibble (at bit 0 and bit 4).
+ * Every slot (16 x 4 bytes = one cache line) holds a check value in entry 0;
+ * entries 1..15 are the counters of the nibble tree. Two possible slots per context:
+ * if neither matches, the one with less experience (count in the root entry) is replaced. */
 static void select_slots(Model *m) {
     u32 nib = m->bitpos == 0 ? 0 : (m->c0 & 15) | 16;
     u32 tag[NHASH]; u32 *a[NHASH];
-    /* Phase 1: alle Adressen berechnen und anfordern -> Speicherzugriffe laufen parallel */
+    /* Phase 1: compute and request all addresses -> the memory accesses run in parallel */
     for (int k = 0; k < NHASH; k++) {
         u32 h = hash2(m->hctx[k], nib + k * 977);
-        tag[k] = (h & 0xFFFFu) | 1u;                  /* nie 0: 0 = leer */
-        a[k] = m->ht[k] + ((h >> (32 - HBITS)) & ~31u);   /* Paar aus zwei benachbarten Slots */
+        tag[k] = (h & 0xFFFFu) | 1u;                  /* never 0: 0 = empty */
+        a[k] = m->ht[k] + ((h >> (32 - HBITS)) & ~31u);   /* pair of two adjacent slots */
         __builtin_prefetch(a[k]);
         __builtin_prefetch(a[k] + 16);
     }
-    /* Phase 2: Prüfsummen vergleichen, ggf. den schwächeren Slot ersetzen */
+    /* Phase 2: compare the check values, replace the weaker slot if needed */
     for (int k = 0; k < NHASH; k++) {
         u32 *x = a[k], *y = a[k] + 16, *s;
         if (x[0] == tag[k]) s = x;
@@ -164,7 +164,7 @@ static void select_slots(Model *m) {
     m->o0slot = m->o0 + (nib == 0 ? 0 : (nib & 15) + 1) * 16;
 }
 
-/* An der Bytegrenze: Kontexte für das nächste Byte berechnen. */
+/* At a byte boundary: compute the contexts for the next byte. */
 static void byte_update(Model *m, u8 c) {
     m->c4 = (m->c4 << 8) | c;
     int letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 128 || (c >= '0' && c <= '9') || c == '_';
@@ -177,7 +177,7 @@ static void byte_update(Model *m, u8 c) {
     m->hctx[3] = hash2(4, c4);
     m->hctx[4] = hash2(hash2(6, c4), m->pos >= 6 ? (u32)(m->buf[m->pos - 5] | m->buf[m->pos - 6] << 8) : 0);
     m->hctx[5] = hash2(hash2(7, m->word0), m->word1 + (letter ? 0 : c));
-    /* Spalte: Position seit Zeilenanfang + Zeichen in der Zeile darüber (Einrückung, Tabellen) */
+    /* Column: position since the line start + character in the line above (indentation, tables) */
     if (c == '\n') { m->above = m->linestart; m->linestart = m->pos; m->col = 0; }
     else m->col++;
 #if TCM_EXTRA >= 1
@@ -188,9 +188,9 @@ static void byte_update(Model *m, u8 c) {
     }
 #endif
 #if TCM_EXTRA >= 2
-    m->hctx[7] = hash2(9, (c4 >> 8) & 0xFFFF);        /* Sparse: Bytes 2 und 3 zurück, ohne das letzte */
+    m->hctx[7] = hash2(9, (c4 >> 8) & 0xFFFF);        /* sparse: bytes 2 and 3 back, without the last one */
 #endif
-    /* Match-Modell: bestehenden Match verlängern oder neuen suchen */
+    /* Match model: extend the existing match or search a new one */
     if (m->mlen && m->buf[m->mptr] == c) { m->mlen++; m->mptr++; }
     else m->mlen = 0;
     if (m->pos >= MINMATCH) {
@@ -216,7 +216,7 @@ static int predict(Model *m) {
     if (m->mlen) {
         u8 pb = m->buf[m->mptr];
         int expect = (pb >> (7 - m->bitpos)) & 1;
-        /* nur gültig, solange die bisherigen Bits dieses Bytes passen */
+        /* only valid as long as the bits of this byte so far match */
         if (((u32)(pb | 256) >> (8 - m->bitpos)) == m->c0) {
             int lb = m->mlen > 31 ? 31 : (int)m->mlen;
             m->mm_idx = lb * 2 + expect; m->mm_expect = 1;
@@ -243,12 +243,12 @@ static void update(Model *m, int bit) {
     for (int k = 0; k < NHASH; k++) sm_update(&m->slot[k][j], bit);
     sm_update(&m->o0slot[j], bit);
     if (m->mm_expect) sm_update(&m->mm_sm[m->mm_idx], bit);
-    /* Mixer trainieren */
+    /* train the mixers */
     int err = ((bit << 12) - m->pm1) * TCM_LR, err2 = ((bit << 12) - m->pm2) * TCM_LR;
     i32 *w = m->w[m->c0], *w2 = m->w2[m->c4 & 0xFF];
     for (int i = 0; i < NIN; i++) { w[i] += (m->x[i] * err) >> 10; w2[i] += (m->x[i] * err2) >> 10; }
     apm_update(&m->a1, bit); apm_update(&m->a2, bit);
-    /* Teilbyte fortschreiben */
+    /* advance the partial byte */
     m->c0 = (m->c0 << 1) | (u32)bit;
     m->jn = (m->jn << 1) | bit;
     m->bitpos++;
@@ -262,7 +262,7 @@ static void update(Model *m, int bit) {
     }
 }
 
-/* ---------------- Arithmetik-Coder (32 Bit, binär) ---------------- */
+/* ---------------- Arithmetic coder (32 bits, binary) ---------------- */
 size_t tcm_bound(size_t n) { return n + n / 32 + 64; }
 
 size_t tcm_compress(const uint8_t *src, size_t n, uint8_t *dst, size_t cap) {
@@ -286,7 +286,7 @@ size_t tcm_compress(const uint8_t *src, size_t n, uint8_t *dst, size_t cap) {
             }
         }
     }
-    for (int k = 0; k < 4 && !overflow; k++) {          /* x1 vollständig ausgeben */
+    for (int k = 0; k < 4 && !overflow; k++) {          /* flush x1 completely */
         if (op >= cap) { overflow = 1; break; }
         dst[op++] = (u8)(x1 >> 24); x1 <<= 8;
     }
@@ -309,7 +309,7 @@ int tcm_decompress(const uint8_t *src, size_t n, uint8_t *dst, size_t rawsize) {
             int bit = x <= xmid;
             if (bit) x2 = xmid; else x1 = xmid + 1;
             c = (c << 1) | (u32)bit;
-            if (b == 7) dst[i] = (u8)c;                 /* Byte steht, bevor das Modell es liest */
+            if (b == 7) dst[i] = (u8)c;                 /* the byte is stored before the model reads it */
             update(m, bit);
             while (((x1 ^ x2) & 0xFF000000u) == 0) {
                 x1 <<= 8; x2 = (x2 << 8) | 255;

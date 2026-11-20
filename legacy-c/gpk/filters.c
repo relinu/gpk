@@ -4,7 +4,7 @@
 
 typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 
-const char *const FILTER_NAMES[FT_COUNT] = {"none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "wort-praediktion", "x86-split"};
+const char *const FILTER_NAMES[FT_COUNT] = {"none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "word-pred", "x86-split"};
 
 static inline u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
 static inline void wr32(u8 *p, u32 v) { memcpy(p, &v, 4); }
@@ -22,16 +22,16 @@ static void unshuffle(const u8 *in, u8 *out, size_t n, int s) {
 }
 
 /* ---- x86 BCJ ---------------------------------------------------------
- * E8 (CALL rel32) / E9 (JMP rel32): Ist das oberste Byte des Operanden 0x00
- * oder 0xFF (kleiner relativer Sprung), wird das Ziel absolut gemacht:
- * v = (rel + pos) mod 2^25, vorzeichenerweitert. Das oberste Byte bleibt dabei
- * 0x00/0xFF, also trifft der Decoder exakt dieselben Entscheidungen -> bijektiv.
- * Effekt: Aufrufe derselben Funktion aus verschiedenen Stellen werden zu
- * identischen Bytefolgen, die LZ findet. */
+ * E8 (CALL rel32) / E9 (JMP rel32): if the top byte of the operand is 0x00
+ * or 0xFF (small relative jump), the target is made absolute:
+ * v = (rel + pos) mod 2^25, sign-extended. The top byte stays
+ * 0x00/0xFF, so the decoder makes exactly the same decisions -> bijective.
+ * Effect: calls of the same function from different places become
+ * identical byte sequences that LZ finds. */
 static void bcj(u8 *b, size_t n, u64 off, int enc) {
-    /* Nach jedem E8/E9 werden die 4 Folgebytes immer übersprungen: So kann
-     * keine spätere Umwandlung ein Byte verändern, das in eine frühere
-     * Entscheidung eingeflossen ist (sonst entscheidet der Decoder anders). */
+    /* After every E8/E9 the 4 following bytes are always skipped: this way no
+     * later transformation can change a byte that went into an earlier
+     * decision (otherwise the decoder would decide differently). */
     size_t i = 0;
     while (i + 5 <= n) {
         if ((b[i] & 0xFE) == 0xE8) {
@@ -47,16 +47,16 @@ static void bcj(u8 *b, size_t n, u64 off, int enc) {
     }
 }
 
-/* ---- x86 mit getrennten Strömen (BCJ2-Prinzip) -----------------------
- * CALL (E8), JMP (E9) und bedingte Sprünge (0F 80..8F) haben einen 4-Byte-
- * Operanden. Diese Operanden werden aus dem Code herausgelöst und gesammelt
- * ans Ende geschrieben (rückwärts aufgereiht, damit der Decoder keine
- * Längenangabe braucht; Gesamtlänge bleibt gleich). Dort stehen sie als
- * absolute Ziele in Big Endian: Aufrufe derselben Funktion werden identisch,
- * und im Code-Strom bleiben nur die Befehlsbytes, die LZ besser findet.
- * Die Absolut-Umrechnung nutzt dieselbe bijektive 25-Bit-Regel wie FT_BCJ. */
+/* ---- x86 with separate streams (BCJ2 principle) ----------------------
+ * CALL (E8), JMP (E9) and conditional jumps (0F 80..8F) have a 4-byte
+ * operand. These operands are taken out of the code and written together
+ * at the end (in reverse order, so the decoder needs no length field; the
+ * total length stays the same). There they are stored as absolute targets
+ * in big endian: calls of the same function become identical, and the code
+ * stream keeps only the instruction bytes, which LZ finds better.
+ * The absolute conversion uses the same bijective 25-bit rule as FT_BCJ. */
 static inline u32 x86_abs(u32 v, u32 pos, int enc) {
-    if ((v >> 24) != 0x00 && (v >> 24) != 0xFF) return v;     /* kein kleiner Sprung: unverändert */
+    if ((v >> 24) != 0x00 && (v >> 24) != 0xFF) return v;     /* not a small jump: unchanged */
     v = enc ? v + pos : v - pos;
     v &= 0x01FFFFFFu;
     if (v & 0x01000000u) v |= 0xFE000000u;
@@ -94,7 +94,7 @@ static void x86s_dec(const u8 *in, u8 *out, size_t n, u64 off) {
     }
 }
 
-/* ---- Feld-Split ------------------------------------------------------ */
+/* ---- Field split ----------------------------------------------------- */
 static void split_layout(const fspec *f, size_t n, u64 off, size_t *head, size_t *nrec, u32 *R) {
     u32 r = 0;
     for (int k = 0; k < f->nfields; k++) r += f->fields[k];
@@ -131,18 +131,18 @@ static void split_dec(const fspec *f, const u8 *in, u8 *out, size_t n, u64 off) 
     memcpy(out + used, q, n - used);
 }
 
-/* ---- Wort-Prädiktion -------------------------------------------------
- * Interpretiert die Daten als W-Bit-Ganzzahlen (W = 2 oder 4, Little Endian),
- * sagt jedes Wort aus dem Wort einen Datensatz (stride Bytes) zuvor voraus und
- * speichert nur den Rest (modulo 2^W). Danach werden die Bytes nach Position
- * im Wort (oder im Datensatz) in Planes getrennt: Die hohen Bytes der Reste
- * sind fast immer 0x00/0xFF und komprimieren extrem gut. */
+/* ---- Word prediction -------------------------------------------------
+ * Interprets the data as W-bit integers (W = 2 or 4, little endian),
+ * predicts every word from the word one record (stride bytes) earlier and
+ * stores only the residual (modulo 2^W). Then the bytes are separated into
+ * planes by their position in the word (or in the record): the high bytes of
+ * the residuals are almost always 0x00/0xFF and compress extremely well. */
 static inline u32 ldw(const u8 *p, int W) { if (W == 2) { uint16_t v; memcpy(&v, p, 2); return v; } u32 v; memcpy(&v, p, 4); return v; }
 static inline void stw(u8 *p, u32 v, int W) { if (W == 2) { uint16_t x = (uint16_t)v; memcpy(p, &x, 2); } else memcpy(p, &v, 4); }
 
 static void wpred_core(const fspec *f, u8 *buf, size_t n, int enc) {
     int W = f->fields[0], ord = f->fields[1];
-    size_t s = f->stride, nw = n / W, k = s / W;          /* Abstand in Wörtern */
+    size_t s = f->stride, nw = n / W, k = s / W;          /* distance in words */
     if (enc) {
         for (size_t j = nw; j-- > 0;) {
             u32 x = ldw(buf + j * W, W), p = 0;

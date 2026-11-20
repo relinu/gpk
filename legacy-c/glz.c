@@ -1,17 +1,17 @@
 /*
- * GLZ – "Game LZ" – siehe glz.h für die Designziele.
+ * GLZ – "Game LZ" – see glz.h for the design goals.
  *
- * Containerformat:
- *   "GLZ1" | u64 Originalgröße | Blöcke...
+ * Container format:
+ *   "GLZ1" | u64 original size | blocks...
  *   Block: u8 filter | u8 stride | u8 mode (0=stored, 1=lz) |
  *          u32 rawsize | u32 payloadsize | payload
  *
- * LZ-Payload eines Blocks:
+ * LZ payload of a block:
  *   u32 nseq | HUF(literals) | HUF(tokens) | HUF(offcodes) |
- *   u32 extlen | ext (LEB128-Längenüberläufe) | u32 bitlen | Offset-Extrabits
+ *   u32 extlen | ext (LEB128 length overflows) | u32 bitlen | offset extra bits
  *
  *   token   = (min(litlen,15) << 4) | min(matchlen-4, 15)
- *   offcode = 0 -> rep0, 1 -> rep1 (Tausch), 2+b -> Offset (1<<b)+extra(b Bits)
+ *   offcode = 0 -> rep0, 1 -> rep1 (swap), 2+b -> offset (1<<b)+extra(b bits)
  */
 #include "glz.h"
 #include <stdint.h>
@@ -45,7 +45,7 @@ static inline u64  rd64(const u8 *p) { u64 v; memcpy(&v, p, 8); return v; }
 static inline int  bitlen32(u32 v) { return 31 - __builtin_clz(v); } /* floor(log2 v), v>0 */
 
 /* ======================================================================= */
-/* Bit-I/O (LSB zuerst)                                                    */
+/* Bit I/O (LSB first)                                                     */
 /* ======================================================================= */
 typedef struct { u8 *p, *start, *end; u64 acc; int n; int overflow; } BW;
 
@@ -70,25 +70,25 @@ typedef struct { const u8 *p, *end; u64 buf; int n; } BR;
 
 static inline void br_init(BR *b, const u8 *p, const u8 *end) { b->p = p; b->end = end; b->buf = 0; b->n = 0; }
 static inline void br_refill(BR *b) {
-    if (b->end - b->p >= 8) {                     /* schneller Pfad */
+    if (b->end - b->p >= 8) {                     /* fast path */
         b->buf |= rd64(b->p) << b->n;
         b->p += (63 - b->n) >> 3;
         b->n |= 56;
-    } else {                                      /* Ende: mit Nullen auffüllen */
+    } else {                                      /* end: pad with zeros */
         while (b->n <= 56) {
             b->buf |= (u64)(b->p < b->end ? *b->p++ : 0) << b->n;
             b->n += 8;
         }
     }
 }
-static inline u32 br_bits(BR *b, int nb) {        /* nb <= 32, vorher refill */
+static inline u32 br_bits(BR *b, int nb) {        /* nb <= 32, refill first */
     u32 v = (u32)(b->buf & ((1ull << nb) - 1));
     b->buf >>= nb; b->n -= nb;
     return v;
 }
 
 /* ======================================================================= */
-/* Kanonisches Huffman, längenbegrenzt auf 11 Bit                           */
+/* Canonical Huffman, length-limited to 11 bits                             */
 /* ======================================================================= */
 static void huf_build_lengths(const u32 *freq_in, u8 *len) {
     u32 f[256];
@@ -101,7 +101,7 @@ static void huf_build_lengths(const u32 *freq_in, u8 *len) {
         if (m == 1) { len[sym[0]] = 1; return; }
         int alive[512], na = 0, nn = m;
         for (int i = 0; i < m; i++) alive[na++] = i;
-        while (na > 1) {                           /* O(n^2), n <= 256: reicht */
+        while (na > 1) {                           /* O(n^2), n <= 256: good enough */
             int a = 0, b = 1;
             if (w[alive[b]] < w[alive[a]]) { a = 1; b = 0; }
             for (int i = 2; i < na; i++) {
@@ -120,13 +120,13 @@ static void huf_build_lengths(const u32 *freq_in, u8 *len) {
         for (int i = nn - 2; i >= 0; i--) depth[i] = depth[parent[i]] + 1;
         for (int i = 0; i < m; i++) { len[sym[i]] = (u8)depth[i]; if (depth[i] > maxl) maxl = depth[i]; }
         if (maxl <= HUF_MAXLEN) return;
-        for (int s = 0; s < 256; s++) if (f[s]) f[s] = (f[s] + 1) >> 1;   /* abflachen, neu bauen */
+        for (int s = 0; s < 256; s++) if (f[s]) f[s] = (f[s] + 1) >> 1;   /* flatten, rebuild */
     }
 }
 
 static u32 rev_bits(u32 v, int n) { u32 r = 0; while (n--) { r = (r << 1) | (v & 1); v >>= 1; } return r; }
 
-/* Liefert 0 bei ungültigen Längen (Kraft-Ungleichung verletzt). */
+/* Returns 0 for invalid lengths (Kraft inequality violated). */
 static int huf_codes(const u8 *len, u32 *code) {
     u32 cnt[16] = {0}, next[16];
     for (int s = 0; s < 256; s++) cnt[len[s]]++;
@@ -140,7 +140,7 @@ static int huf_codes(const u8 *len, u32 *code) {
     return 1;
 }
 
-/* Stream: mode(1) | u32 count | ...   mode 0 = roh, 1 = RLE, 2 = Huffman */
+/* Stream: mode(1) | u32 count | ...   mode 0 = raw, 1 = RLE, 2 = Huffman */
 static size_t huf_encode(const u8 *src, u32 n, u8 *dst, size_t cap) {
     if (cap < 5 + (size_t)n + 4) return 0;
     u32 freq[256] = {0};
@@ -169,7 +169,7 @@ static size_t huf_encode(const u8 *src, u32 n, u8 *dst, size_t cap) {
     return 5 + n;
 }
 
-/* Liefert Zeiger hinter den Stream oder NULL. */
+/* Returns a pointer behind the stream or NULL. */
 static const u8 *huf_decode(const u8 *p, const u8 *end, u8 *out, u32 maxn, u32 *nout) {
     if (end - p < 5) return NULL;
     u8 mode = p[0]; u32 n = rd32(p + 1); p += 5;
@@ -192,7 +192,7 @@ static const u8 *huf_decode(const u8 *p, const u8 *end, u8 *out, u32 maxn, u32 *
     for (int s = 0; s < 256; s++) if (len[s] > HUF_MAXLEN) return NULL;
     if (!huf_codes(len, code)) return NULL;
     u16 tab[HUF_TABSIZE];
-    for (u32 i = 0; i < HUF_TABSIZE; i++) tab[i] = 1;   /* Lücken (korrupte Daten): harmlos */
+    for (u32 i = 0; i < HUF_TABSIZE; i++) tab[i] = 1;   /* gaps (corrupt data): harmless */
     for (int s = 0; s < 256; s++) {
         if (!len[s]) continue;
         u16 e = (u16)((s << 4) | len[s]);
@@ -209,7 +209,7 @@ static const u8 *huf_decode(const u8 *p, const u8 *end, u8 *out, u32 maxn, u32 *
 }
 
 /* ======================================================================= */
-/* Vorfilter                                                               */
+/* Pre-filters                                                             */
 /* ======================================================================= */
 static void shuffle(const u8 *in, u8 *out, size_t n, int s) {
     size_t m = n / s;
@@ -234,7 +234,7 @@ static void filt_enc(int f, int s, const u8 *in, u8 *out, size_t n) {
     default: memcpy(out, in, n);
     }
 }
-static void filt_dec(int f, int s, u8 *in, u8 *out, size_t n) {   /* in darf verändert werden */
+static void filt_dec(int f, int s, u8 *in, u8 *out, size_t n) {   /* in may be modified */
     switch (f) {
     case F_DELTA:
         for (size_t i = 0; i < n; i++) out[i] = i >= (size_t)s ? (u8)(in[i] + out[i - s]) : in[i];
@@ -248,7 +248,7 @@ static void filt_dec(int f, int s, u8 *in, u8 *out, size_t n) {   /* in darf ver
     }
 }
 
-/* Order-0-Entropie (Bits) der Delta(s)-Folge einer Stichprobe. */
+/* Order-0 entropy (bits) of the delta(s) sequence of a sample. */
 static double delta_entropy(const u8 *p, size_t n, int s) {
     u32 h[256] = {0};
     for (size_t i = s; i < n; i++) h[(u8)(p[i] - p[i - s])]++;
@@ -282,7 +282,7 @@ typedef struct {
     u32 nlit, nseq, next;
     BW ob;
     u32 rep0, rep1;
-    int litcost;          /* geschätzte Literal-Kosten in 1/16 Bit */
+    int litcost;          /* estimated literal cost in 1/16 bit */
 } Enc;
 
 typedef struct { u32 len, off; int gain; } Match;
@@ -298,8 +298,8 @@ static inline u32 match_len(const u8 *a, const u8 *b, const u8 *end) {
     return (u32)(a - s);
 }
 
-/* Kostenmodell in 1/16 Bit: Literal = Order-0-Entropie des Blocks (adaptiv),
- * Match = Token + Offset-Code + Extrabits (geschätzt). */
+/* Cost model in 1/16 bit: literal = order-0 entropy of the block (adaptive),
+ * match = token + offset code + extra bits (estimated). */
 static inline int match_gain(u32 len, u32 off, u32 rep0, u32 rep1, int litcost) {
     int cost = (off == rep0 || off == rep1) ? 4 * 16 : (9 + bitlen32(off)) * 16;
     return (int)len * litcost - cost;
@@ -361,13 +361,13 @@ static void emit_seq(Enc *e, const u8 *lits, u32 ll, u32 ml, u32 off) {
     e->ofc[e->nseq++] = oc;
 }
 
-/* Komprimiert einen (bereits gefilterten) Block. 0 = passt nicht. */
+/* Compresses an (already filtered) block. 0 = does not fit. */
 static size_t lz_block(Enc *e, const u8 *src, u32 n, int level, u8 *out, size_t cap) {
     const LevelParams *lp = &LEVELS[level];
     for (u32 i = 0; i < (1u << HASH_BITS); i++) e->head[i] = NIL;
     e->nlit = e->nseq = e->next = 0;
     e->rep0 = 1; e->rep1 = 4;
-    {   /* Literal-Kosten aus der Order-0-Entropie schätzen (+0.5 Bit Huffman-Overhead) */
+    {   /* estimate the literal cost from the order-0 entropy (+0.5 bit Huffman overhead) */
         double en = n > 16 ? order0_entropy(src, n) : 8.0 * n;
         e->litcost = (int)(16.0 * (en / (n ? n : 1) + 0.5));
         if (e->litcost < 16) e->litcost = 16;
@@ -418,7 +418,7 @@ static size_t filtered_size(Enc *e, const u8 *src, u32 n, int f, int s, int leve
     return r ? r : (size_t)-1;
 }
 
-/* Wählt per Stride-Erkennung + Probekompression den besten Filter. */
+/* Chooses the best filter via stride detection + trial compression. */
 static void choose_filter(Enc *e, const u8 *src, u32 n, int *bf, int *bs) {
     *bf = F_NONE; *bs = 0;
     if (n < 4096) return;
@@ -426,7 +426,7 @@ static void choose_filter(Enc *e, const u8 *src, u32 n, int *bf, int *bs) {
     int best_s = 1; double best_e = 1e300;
     for (int s = 1; s <= 32; s++) {
         double en = delta_entropy(src, sample, s);
-        if (en < best_e * 0.995) { best_e = en; best_s = s; }   /* kleine Strides bevorzugen */
+        if (en < best_e * 0.995) { best_e = en; best_s = s; }   /* prefer small strides */
     }
     struct { int f, s; } cand[6]; int nc = 0;
     cand[nc].f = F_NONE;  cand[nc++].s = 0;
@@ -485,7 +485,7 @@ size_t glz_compress(const void *src_, size_t n, void *dst_, size_t cap, int leve
             memcpy(dst + op + BLK_HDR, e.scratch, k);
             op += BLK_HDR + k;
             g_stats.filter_count[f]++; g_stats.last_stride = (unsigned)s;
-        } else {                                         /* nicht komprimierbar: roh speichern */
+        } else {                                         /* not compressible: store raw */
             if (cap - op - BLK_HDR < bn) goto done;
             dst[op] = 0; dst[op + 1] = 0; dst[op + 2] = 0;
             wr32(dst + op + 3, bn); wr32(dst + op + 7, bn);
@@ -562,7 +562,7 @@ static int lz_decode_block(Dec *d, const u8 *p, const u8 *end, u8 *out, u32 raws
         }
         if (off > (u32)(op - out) || ml > (u32)(oend - op)) return 0;
         const u8 *m = op - off;
-        if (off >= 8 && (size_t)(oend - op) >= (size_t)ml + 8) {   /* 8-Byte-Wildcopy */
+        if (off >= 8 && (size_t)(oend - op) >= (size_t)ml + 8) {   /* 8-byte wild copy */
             u8 *dend = op + ml;
             do { memcpy(op, m, 8); op += 8; m += 8; } while (op < dend);
             op = dend;

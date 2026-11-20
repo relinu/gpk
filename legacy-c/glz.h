@@ -1,40 +1,40 @@
 /*
- * GLZ – "Game LZ": ein Kompressor für Spiel-Assets.
+ * GLZ – "Game LZ": a compressor for game assets.
  *
- * Designziele (typisch für Spiele):
- *   - Asymmetrisch: Kompression passiert einmal beim Build, Dekompression
- *     bei jedem Ladevorgang -> Dekompression muss schnell sein.
- *   - Unabhängige Blöcke (Standard 1 MiB) -> Streaming, paralleles Entpacken
- *     und wahlfreier Zugriff in Paketdateien.
- *   - Automatische Vorfilter für Binärdaten (Texturen, Vertex-Puffer,
- *     Audio, Heightmaps): Stride-Erkennung + Delta / Byte-Plane-Shuffle.
- *   - Backend: LZ77 (Hash-Ketten, Lazy Matching, 2 Repeat-Offsets)
- *     + kanonisches Huffman (max. 11 Bit, tabellenbasiert dekodiert).
+ * Design goals (typical for games):
+ *   - Asymmetric: compression happens once at build time, decompression
+ *     on every load -> decompression must be fast.
+ *   - Independent blocks (default 1 MiB) -> streaming, parallel unpacking
+ *     and random access in package files.
+ *   - Automatic pre-filters for binary data (textures, vertex buffers,
+ *     audio, height maps): stride detection + delta / byte-plane shuffle.
+ *   - Back end: LZ77 (hash chains, lazy matching, 2 repeat offsets)
+ *     + canonical Huffman (max. 11 bits, table-driven decoding).
  */
 #ifndef GLZ_H
 #define GLZ_H
 #include <stddef.h>
 
-#define GLZ_FLAG_NO_FILTER 1u   /* Vorfilter deaktivieren (Ablation)      */
+#define GLZ_FLAG_NO_FILTER 1u   /* disable the pre-filters (ablation)     */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Maximale Größe der komprimierten Daten für n Eingabebytes. */
+/* Maximum size of the compressed data for n input bytes. */
 size_t glz_bound(size_t n);
 
-/* level 1..9. Liefert komprimierte Größe oder 0 bei Fehler. */
+/* level 1..9. Returns the compressed size or 0 on error. */
 size_t glz_compress(const void *src, size_t n, void *dst, size_t cap,
                     int level, unsigned flags);
 
-/* Liefert dekomprimierte Größe oder (size_t)-1 bei Fehler/korrupten Daten. */
+/* Returns the decompressed size or (size_t)-1 on error/corrupt data. */
 size_t glz_decompress(const void *src, size_t n, void *dst, size_t cap);
 
-/* Liest die Originalgröße aus dem Header ((size_t)-1 bei Fehler). */
+/* Reads the original size from the header ((size_t)-1 on error). */
 size_t glz_decompressed_size(const void *src, size_t n);
 
-/* Statistik der letzten Kompression: wie oft wurde welcher Filter gewählt. */
+/* Statistics of the last compression: how often each filter was chosen. */
 typedef struct { unsigned filter_count[5]; unsigned last_stride; } glz_stats;
 const glz_stats *glz_last_stats(void);
 

@@ -1,13 +1,13 @@
 /*
- * PNG-Rekompression nach dem Precomp/Preflate-Prinzip (vereinfacht):
- * Die IDAT-Chunks eines PNG enthalten einen zlib-Strom. Wurde er von zlib
- * erzeugt, lässt er sich mit denselben Parametern (Level, memLevel, Strategie)
- * bitgenau neu erzeugen. Dann speichern wir statt des Deflate-Stroms die
- * entpackten Bilddaten (die LZRC deutlich besser komprimiert) plus die Parameter.
- * Streams anderer Encoder (zopfli, oxipng ...) werden nicht umgewandelt.
+ * PNG recompression following the Precomp/Preflate principle (simplified):
+ * the IDAT chunks of a PNG contain a zlib stream. If it was produced by zlib,
+ * it can be recreated bit-exactly with the same parameters (level, memLevel,
+ * strategy). Then, instead of the Deflate stream, we store the inflated image
+ * data (which LZRC compresses much better) plus the parameters.
+ * Streams from other encoders (zopfli, oxipng ...) are not transformed.
  *
- * Format: "PNGX" | level | memLevel | strategy | 0 | u32 skel_len | Skelett | u32 raw_len | raw
- * Skelett = PNG ohne IDAT-Nutzdaten (Länge, Typ und CRC jedes Chunks bleiben).
+ * Format: "PNGX" | level | memLevel | strategy | 0 | u32 skel_len | skeleton | u32 raw_len | raw
+ * skeleton = PNG without the IDAT payload (length, type and CRC of every chunk remain).
  */
 #include "pngx.h"
 #include "pxc.h"
@@ -33,7 +33,7 @@ static u8 *deflate_with(const u8 *raw, size_t rn, int level, int mem, int strat,
     return o;
 }
 
-/* ---- PNG-Zeilenfilter (8 Bit je Kanal, bpp = Kanäle) ---- */
+/* ---- PNG row filters (8 bits per channel, bpp = channels) ---- */
 static inline u8 paeth(int a, int b, int c) {
     int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
     return (u8)((pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c));
@@ -42,7 +42,7 @@ static inline u8 png_pred(int f, const u8 *cur, const u8 *prior, size_t i, int b
     int a = i >= (size_t)bpp ? cur[i - bpp] : 0, b = prior ? prior[i] : 0, c = (prior && i >= (size_t)bpp) ? prior[i - bpp] : 0;
     switch (f) { case 1: return (u8)a; case 2: return (u8)b; case 3: return (u8)((a + b) >> 1); case 4: return paeth(a, b, c); default: return 0; }
 }
-/* raw (h Zeilen à 1+w*bpp) -> Pixel + Filtertypen; 0 bei ungültigen Filtertypen */
+/* raw (h rows of 1+w*bpp bytes) -> pixels + filter types; 0 for invalid filter types */
 static int png_unfilter(const u8 *raw, u32 w, u32 h, int bpp, u8 *px, u8 *filt) {
     size_t rl = (size_t)w * bpp;
     for (u32 y = 0; y < h; y++) {
@@ -63,7 +63,7 @@ static void png_refilter(const u8 *px, const u8 *filt, u32 w, u32 h, int bpp, u8
         for (size_t i = 0; i < rl; i++) dst[1 + i] = (u8)(cur[i] - png_pred(filt[y], cur, prior, i, bpp));
     }
 }
-/* IHDR lesen: nur 8 Bit, nicht interlaced, Grau/RGB/Grau+Alpha/RGBA */
+/* read IHDR: 8 bits only, not interlaced, gray/RGB/gray+alpha/RGBA */
 static int png_geom(const u8 *png, size_t n, u32 *w, u32 *h, int *ch) {
     if (n < 33 || memcmp(png + 12, "IHDR", 4) || be32(png + 8) != 13) return 0;
     *w = be32(png + 16); *h = be32(png + 20);
@@ -73,7 +73,7 @@ static int png_geom(const u8 *png, size_t n, u32 *w, u32 *h, int *ch) {
     return *ch && (u64)*w * *h * (u64)*ch <= MAX_RAW;
 }
 
-/* Kopf + Skelett + Restdaten -> Original-PNG zusammensetzen (beide Varianten) */
+/* header + skeleton + remaining data -> assemble the original PNG (both variants) */
 static int assemble(const u8 *skel, u32 sk, const u8 *raw, size_t rn, int lvl, int mem, int strat, u8 *out, size_t origsize) {
     size_t zn; u8 *zs = deflate_with(raw, rn, lvl, mem, strat, &zn);
     if (!zs) return 0;
@@ -103,7 +103,7 @@ int pngx_channels(const uint8_t *png, size_t n) { u32 w, h; int ch; return png_g
 uint8_t *pngx_forward_mode(const uint8_t *png, size_t n, int mode, size_t *tsize) {
     static const u8 SIG[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
     if (n < 8 + 12 || memcmp(png, SIG, 8) || n > MAX_RAW) return NULL;
-    /* Chunks durchgehen: Skelett bauen, IDAT-Daten sammeln */
+    /* walk the chunks: build the skeleton, collect the IDAT data */
     u8 *skel = malloc(n), *zs = malloc(n);
     size_t sk = 0, zn = 0, p = 8;
     memcpy(skel, png, 8); sk = 8;
@@ -120,7 +120,7 @@ uint8_t *pngx_forward_mode(const uint8_t *png, size_t n, int mode, size_t *tsize
         if (!memcmp(type, "IEND", 4)) { ok = 1; break; }
     }
     if (!ok || p != n || zn == 0) goto fail;
-    /* Entpacken */
+    /* inflate */
     z_stream z; memset(&z, 0, sizeof z);
     if (inflateInit(&z) != Z_OK) goto fail;
     size_t rcap = zn * 4 + 65536, rn = 0;
@@ -136,7 +136,7 @@ uint8_t *pngx_forward_mode(const uint8_t *png, size_t n, int mode, size_t *tsize
     int consumed_all = z.total_in == zn;
     inflateEnd(&z);
     if (r != Z_STREAM_END || !consumed_all) { free(raw); goto fail; }
-    /* Parameter suchen, mit denen zlib den Strom bitgenau erzeugt */
+    /* search the parameters with which zlib produces the stream bit-exactly */
     static const int LV[] = {9, 6, 8, 7, 5, 4, 3, 2, 1};
     for (int si = 0; si < 2; si++)
         for (int mi = 0; mi < 2; mi++)
@@ -148,7 +148,7 @@ uint8_t *pngx_forward_mode(const uint8_t *png, size_t n, int mode, size_t *tsize
                 if (!match) continue;
                 size_t tn;
                 u8 *t = NULL;
-                if (mode == 2) {                             /* Pixel-Coder statt Rohdaten */
+                if (mode == 2) {                             /* pixel coder instead of raw data */
                     u32 w, h; int ch;
                     if (!png_geom(png, n, &w, &h, &ch) || rn != (size_t)h * (1 + (size_t)w * ch)) goto nomatch;
                     u8 *px = malloc((size_t)w * h * ch), *filt = malloc(h);
@@ -172,7 +172,7 @@ uint8_t *pngx_forward_mode(const uint8_t *png, size_t n, int mode, size_t *tsize
                     wr32(t + 12 + sk, (u32)rn); memcpy(t + 16 + sk, raw, rn);
                 }
                 free(raw); free(skel); free(zs);
-                /* Sicherheitsnetz: Rekonstruktion vorab prüfen */
+                /* safety net: check the reconstruction up front */
                 u8 *chk = malloc(n);
                 int good = pngx_inverse(t, tn, chk, n) && !memcmp(chk, png, n);
                 free(chk);

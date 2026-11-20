@@ -1,4 +1,4 @@
-/* LZRC – siehe lzrc.h */
+/* LZRC – see lzrc.h */
 #include "lzrc.h"
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +13,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t
 #define END_POS_IDX 14
 #define FULL_DIST   128
 #define OPT_NUM     2048
-#define DENSE_LEN   48     /* bis hierhin jede Länge prüfen, darüber in 16er-Schritten */
+#define DENSE_LEN   48     /* check every length up to here, above in steps of 16 */
 #define H4BITS      20
 #define H3BITS      16
 #define NIL         0xFFFFFFFFu
@@ -29,7 +29,7 @@ static const u8 NEXT_LIT[NSTATES] = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5};
 #define NEXT_SHORTREP(s) ((s) < 7 ? 9 : 11)
 
 /* ------------------------------------------------------------------ */
-/* Modell                                                              */
+/* Model                                                               */
 /* ------------------------------------------------------------------ */
 typedef struct { u16 choice, choice2, low[16][8], mid[16][8], high[256]; } LenModel;
 typedef struct {
@@ -171,7 +171,7 @@ static inline u32 dec_dist(RCD *rc, Model *m, u32 len) {
     u32 direct = 0;
     for (int i = 0; i < fb - 4; i++) {
         rc->range >>= 1;
-        u32 t = (rc->code - rc->range) >> 31;          /* 1 wenn code < range */
+        u32 t = (rc->code - rc->range) >> 31;          /* 1 if code < range */
         rc->code -= rc->range & (t - 1);
         direct = (direct << 1) | (1 - t);
         if (rc->range < (1u << 24)) { rc->range <<= 8; rc->code = (rc->code << 8) | rcd_next(rc); }
@@ -248,14 +248,14 @@ int lzrc_decompress(const uint8_t *src, size_t n, uint8_t *out, size_t rawsize) 
 }
 
 /* ------------------------------------------------------------------ */
-/* Preise (Kosten in 1/16 Bit) für den optimalen Parser                */
+/* Prices (cost in 1/16 bit) for the optimal parser                    */
 /* ------------------------------------------------------------------ */
 static u32 PRICE[128];
 static void init_prices(void) {
     static int done = 0;
     if (done) return;
     for (int i = 0; i < 128; i++) PRICE[i] = (u32)(-log2((i * 16 + 8) / 2048.0) * 16 + 0.5);
-    done = 1;   /* idempotent: Rennen zwischen Threads ist harmlos */
+    done = 1;   /* idempotent: a race between threads is harmless */
 }
 #define P0(p) PRICE[(p) >> 4]
 #define P1(p) PRICE[(2048 - (p)) >> 4]
@@ -305,7 +305,7 @@ static void update_prices(const Model *m, Prices *pr) {
     for (int ls = 0; ls < 4; ls++) {
         for (u32 s = 0; s < 64; s++) {
             pr->slot[ls][s] = price_tree(m->posSlot[ls], 6, s);
-            if (s >= END_POS_IDX) pr->slot[ls][s] += (((s >> 1) - 1 - 4) << 4);   /* direkte Bits */
+            if (s >= END_POS_IDX) pr->slot[ls][s] += (((s >> 1) - 1 - 4) << 4);   /* direct bits */
         }
         for (u32 d = 0; d < FULL_DIST; d++) {
             u32 s = pos_slot(d), p = pr->slot[ls][s];
@@ -333,7 +333,7 @@ typedef struct { u32 len, dist; } MatchPair;
 typedef struct {
     Model m; RCE rc; Prices pr;
     const u8 *buf; u32 n;
-    u32 *head4, *head3, *son;   /* son: Binärbaum, 2 Kinder je Position */
+    u32 *head4, *head3, *son;   /* son: binary tree, 2 children per position */
     u32 ins;
     int depth, nice;
     u32 state, reps[4];
@@ -355,8 +355,8 @@ static inline u32 match_len(const u8 *a, const u8 *b, u32 limit) {
     return l;
 }
 
-/* Binärbaum-Match-Finder: sucht Matches an pos und fügt pos in den Baum ein.
- * Jeder Knoten sortiert frühere Positionen lexikografisch nach ihrem Suffix. */
+/* Binary-tree match finder: searches matches at pos and inserts pos into the tree.
+ * Every node orders earlier positions lexicographically by their suffix. */
 static int bt_find(Enc *e, u32 pos, u32 lenLimit, u32 maxLen, int cnt, int record) {
     const u8 *cur = e->buf + pos;
     u32 h = h4(cur), curMatch = e->head4[h];
@@ -387,7 +387,7 @@ static inline u32 bt_limit(Enc *e, u32 pos) {
     return r < (u32)e->nice ? r : (u32)e->nice;
 }
 
-/* Fügt übersprungene Positionen in den Baum ein (ohne Matches zu sammeln). */
+/* Inserts skipped positions into the tree (without collecting matches). */
 static void skip_to(Enc *e, u32 t) {
     for (; e->ins < t; e->ins++) {
         u32 i = e->ins;
@@ -397,7 +397,7 @@ static void skip_to(Enc *e, u32 t) {
     }
 }
 
-/* Liefert Matches mit streng steigender Länge (jeweils kürzeste Distanz). */
+/* Returns matches with strictly increasing length (shortest distance for each). */
 static int get_matches(Enc *e, u32 pos, u32 avail) {
     skip_to(e, pos);
     if (pos + 4 > e->n) { e->ins = pos + 1; return 0; }
@@ -412,7 +412,7 @@ static int get_matches(Enc *e, u32 pos, u32 avail) {
     u32 lim = bt_limit(e, pos);
     cnt = bt_find(e, pos, lim, best, cnt, 1);
     e->ins = pos + 1;
-    /* Match bis an die Grenze: über die "nice"-Länge hinaus verlängern */
+    /* match reaches the limit: extend it beyond the "nice" length */
     if (cnt && e->mp[cnt - 1].len == lim && lim < avail) {
         MatchPair *mp = &e->mp[cnt - 1];
         mp->len += match_len(cur + mp->len, cur + mp->len - mp->dist - 1, avail - mp->len);
@@ -495,7 +495,7 @@ static void encode_step(Enc *e, u32 pos, u8 kind, u32 len, u32 dist) {
     e->state = NEXT_REP(st);
 }
 
-/* Ein Fenster per DP optimal parsen und kodieren; liefert Anzahl verarbeiteter Bytes. */
+/* Parse one window optimally via DP and encode it; returns the number of bytes processed. */
 static u32 parse_window(Enc *e, u32 pos) {
     Node *nodes = e->nodes;
     const Model *m = &e->m;
@@ -529,7 +529,7 @@ static u32 parse_window(Enc *e, u32 pos) {
         if (nd->reps[0] < P && cur[0] == cur[-(int64_t)nd->reps[0] - 1])
             relax(nodes, i + 1, repP + P0(m->isRepG0[st]) + P0(m->isRep0Long[st][ps]), i, K_SHORTREP, 1, 0);
 
-        /* Repeat-Distanzen */
+        /* Repeat distances */
         if (avail >= MINLEN) {
             for (u32 r = 0; r < 4; r++) {
                 u32 d = nd->reps[r];
@@ -544,7 +544,7 @@ static u32 parse_window(Enc *e, u32 pos) {
             }
         }
 
-        /* Neue Matches */
+        /* New matches */
         int nm = get_matches(e, P, avail);
         if (nm) {
             u32 normP = matchP + P0(m->isRep[st]);
@@ -560,13 +560,13 @@ static u32 parse_window(Enc *e, u32 pos) {
             }
         }
 
-        if (longest >= (u32)e->nice) {           /* langer Match: Fenster hier beenden */
+        if (longest >= (u32)e->nice) {           /* long match: end the window here */
             end = i + longest;
             break;
         }
     }
 
-    /* Rückverfolgung: Pfad rückwärts sammeln, dann vorwärts kodieren */
+    /* Trace back: collect the path backwards, then encode forwards */
     static __thread u32 path[OPT_NUM + MAXLEN + 2];
     u32 np = 0, j = end;
     while (j > 0) { path[np++] = j; j = nodes[j].from; }

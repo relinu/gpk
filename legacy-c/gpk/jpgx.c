@@ -1,4 +1,4 @@
-/* JPGX – siehe jpgx.h. Nur Ganzzahl-Arithmetik. */
+/* JPGX – see jpgx.h. Integer arithmetic only. */
 #include "jpgx.h"
 #include <stdlib.h>
 #include <string.h>
@@ -8,20 +8,20 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef int16_t 
 #define MAX_PIXELS (1ull << 28)
 
 /* ======================================================================= */
-/* JPEG-Struktur                                                           */
+/* JPEG structure                                                          */
 /* ======================================================================= */
 typedef struct {
     int present;
     u8 bits[17], vals[256]; int nvals;
-    int maxcode[18], valptr[17], mincode[17];     /* Dekodierung */
-    u16 code[256]; u8 len[256];                    /* Kodierung (je Symbol) */
+    int maxcode[18], valptr[17], mincode[17];     /* decoding */
+    u16 code[256]; u8 len[256];                    /* encoding (per symbol) */
 } Huff;
 typedef struct { int id, h, v, td, ta; int bw, bh; i16 *coef; } Comp;
 typedef struct {
     int X, Y, nf, ns, ri, hmax, vmax, mcux, mcuy, interleaved;
-    Comp c[4]; int scan[4];                        /* Komponenten in Scan-Reihenfolge (Index in c) */
+    Comp c[4]; int scan[4];                        /* components in scan order (index into c) */
     Huff dc[4], ac[4];
-    size_t data_start;                             /* Beginn der entropiekodierten Daten */
+    size_t data_start;                             /* start of the entropy-coded data */
 } JInfo;
 
 static u32 be16(const u8 *p) { return (u32)p[0] << 8 | p[1]; }
@@ -37,7 +37,7 @@ static int build_huff(Huff *h) {
             h->code[s] = (u16)code; h->len[s] = (u8)l; code++;
         }
         h->maxcode[l] = h->bits[l] ? code - 1 : -1;
-        if (code > (1 << l)) return 0;                 /* kein gültiger Präfixcode */
+        if (code > (1 << l)) return 0;                 /* not a valid prefix code */
         code <<= 1;
     }
     h->maxcode[17] = 0x7FFFFFFF;
@@ -45,14 +45,14 @@ static int build_huff(Huff *h) {
     return 1;
 }
 
-/* Kopf bis einschließlich SOS lesen. Liefert 1 bei unterstützter Datei. */
+/* Read the header up to and including SOS. Returns 1 for a supported file. */
 static int parse_header(const u8 *d, size_t n, JInfo *J) {
     memset(J, 0, sizeof *J);
     if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return 0;
     size_t p = 2; int have_sof = 0;
     for (;;) {
         if (p + 4 > n || d[p] != 0xFF) return 0;
-        while (p < n && d[p] == 0xFF) p++;            /* Füllbytes */
+        while (p < n && d[p] == 0xFF) p++;            /* fill bytes */
         if (p >= n) return 0;
         u8 m = d[p++];
         if (m == 0xD8 || m == 0xD9 || (m >= 0xD0 && m <= 0xD7) || m == 0x01) return 0;
@@ -74,7 +74,7 @@ static int parse_header(const u8 *d, size_t n, JInfo *J) {
             }
             have_sof = 1;
         } else if ((m >= 0xC2 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC)) {
-            return 0;                                   /* progressiv, verlustfrei, arithmetisch */
+            return 0;                                   /* progressive, lossless, arithmetic */
         } else if (m == 0xC4) {
             u32 q = 0;
             while (q < sl) {
@@ -97,7 +97,7 @@ static int parse_header(const u8 *d, size_t n, JInfo *J) {
             if (!have_sof || sl < 1) return 0;
             J->ns = s[0];
             if (J->ns < 1 || J->ns > 4 || sl != 4u + 2u * J->ns) return 0;
-            if (J->ns != J->nf) return 0;               /* nur ein Scan mit allen Komponenten */
+            if (J->ns != J->nf) return 0;               /* only one scan with all components */
             for (int i = 0; i < J->ns; i++) {
                 int cid = s[1 + 2 * i], k = -1;
                 for (int j = 0; j < J->nf; j++) if (J->c[j].id == cid) k = j;
@@ -114,7 +114,7 @@ static int parse_header(const u8 *d, size_t n, JInfo *J) {
         }
         p += L;
     }
-    /* Geometrie */
+    /* Geometry */
     J->interleaved = J->ns > 1;
     if (J->interleaved) {
         J->mcux = (J->X + 8 * J->hmax - 1) / (8 * J->hmax);
@@ -139,7 +139,7 @@ static int alloc_coefs(JInfo *J) {
 }
 static void free_coefs(JInfo *J) { for (int i = 0; i < 4; i++) { free(J->c[i].coef); J->c[i].coef = NULL; } }
 
-/* Blockreihenfolge im Scan: ruft fn(comp, row, col) für jeden Block auf; Restart-Grenzen über mcu_done */
+/* Block order in the scan: calls fn(comp, row, col) for every block; restart boundaries via mcu_done */
 #define FOR_EACH_MCU_BLOCK(J, mcu, ...)                                                         \
     for (long mcu = 0; mcu < (long)(J)->mcux * (J)->mcuy; mcu++) {                              \
         long my_ = mcu / (J)->mcux, mx_ = mcu % (J)->mcux;                                       \
@@ -154,7 +154,7 @@ static void free_coefs(JInfo *J) { for (int i = 0; i < 4; i++) { free(J->c[i].co
         }
 
 /* ======================================================================= */
-/* Huffman-Scan dekodieren (bitweise, mit Marker-Prüfung)                   */
+/* Decode the Huffman scan (bitwise, with marker checks)                    */
 /* ======================================================================= */
 typedef struct { const u8 *d; size_t n, p; u32 byte; int cnt; int err; } BR;
 static int br_bit(BR *b) {
@@ -162,7 +162,7 @@ static int br_bit(BR *b) {
         if (b->p >= b->n) { b->err = 1; return 0; }
         u8 x = b->d[b->p++];
         if (x == 0xFF) {
-            if (b->p >= b->n || b->d[b->p] != 0x00) { b->err = 1; return 0; }   /* Marker mitten in Daten */
+            if (b->p >= b->n || b->d[b->p] != 0x00) { b->err = 1; return 0; }   /* marker in the middle of the data */
             b->p++;
         }
         b->byte = x; b->cnt = 8;
@@ -180,7 +180,7 @@ static int huff_dec(BR *b, const Huff *h) {
     b->err = 1; return 0;
 }
 static int extend(int v, int s) { return s && v < (1 << (s - 1)) ? v - (1 << s) + 1 : v; }
-/* Restbits bis zur Bytegrenze müssen 1 sein (Standard-Padding) */
+/* the remaining bits up to the byte boundary must be 1 (standard padding) */
 static int br_pad_ok(BR *b) { int ok = (b->byte & ((1u << b->cnt) - 1)) == ((1u << b->cnt) - 1); b->cnt = 0; return ok; }
 
 static int decode_scan(const u8 *d, size_t n, JInfo *J, size_t *scan_end) {
@@ -200,7 +200,7 @@ static int decode_scan(const u8 *d, size_t n, JInfo *J, size_t *scan_end) {
         }
         if (b.err) return 0;
     })
-        if (J->ri && --left == 0 && mcu + 1 < (long)J->mcux * J->mcuy) {   /* Restart-Intervall endet */
+        if (J->ri && --left == 0 && mcu + 1 < (long)J->mcux * J->mcuy) {   /* restart interval ends */
             if (!br_pad_ok(&b)) return 0;
             if (b.p + 2 > n || d[b.p] != 0xFF || d[b.p + 1] != 0xD0 + rst) return 0;
             b.p += 2; rst = (rst + 1) & 7; left = J->ri;
@@ -213,7 +213,7 @@ static int decode_scan(const u8 *d, size_t n, JInfo *J, size_t *scan_end) {
 }
 
 /* ======================================================================= */
-/* Huffman-Scan exakt neu erzeugen                                          */
+/* Recreate the Huffman scan exactly                                        */
 /* ======================================================================= */
 typedef struct { u8 *o; size_t n, cap; u32 acc; int cnt; int err; } BW;
 static void bw_byte(BW *w, u8 x) {
@@ -260,7 +260,7 @@ static int encode_scan(JInfo *J, BW *w) {
 }
 
 /* ======================================================================= */
-/* Kontextmodell für die Koeffizienten                                      */
+/* Context model for the coefficients                                       */
 /* ======================================================================= */
 typedef struct { u16 f, s; } Prob;
 typedef struct { u32 x1, x2, x; u8 *out; size_t n, cap; const u8 *in; size_t ip, inn; int dec, err; } AC;
@@ -268,7 +268,7 @@ static void ac_put(AC *a, u8 b) {
     if (a->n == a->cap) { a->cap = a->cap * 2 + 65536; u8 *p = realloc(a->out, a->cap); if (!p) { a->err = 1; return; } a->out = p; }
     a->out[a->n++] = b;
 }
-/* Ein Bit kodieren oder (im Decoder) lesen – dieselbe Modellfunktion für beide Richtungen */
+/* Encode a bit or (in the decoder) read it – the same model function for both directions */
 static int cbit(AC *a, Prob *p, int bit) {
     u32 pr = ((u32)p->f + p->s) >> 5; pr = pr < 1 ? 1 : (pr > 4095 ? 4095 : pr);
     u32 xmid = a->x1 + (u32)(((u64)(a->x2 - a->x1) * pr) >> 12);
@@ -290,11 +290,11 @@ static int cbit(AC *a, Prob *p, int bit) {
 #define NNZ 11
 #define MAXE 12
 typedef struct {
-    Prob nz[2][NNZ][64];                        /* Anzahl Nicht-Null-AC (6-Bit-Baum) */
-    Prob zero[2][NKB][NMQ][NRQ];                /* Koeffizient != 0 ? */
-    Prob ex[2][NKB][NMQ][MAXE];                 /* Exponent unär */
-    Prob mt[2][MAXE][2];                        /* Mantisse: oberstes Bit / Rest */
-    Prob sg[2][NKB][9];                         /* Vorzeichen nach Nachbar-Vorzeichen */
+    Prob nz[2][NNZ][64];                        /* number of non-zero AC coefficients (6-bit tree) */
+    Prob zero[2][NKB][NMQ][NRQ];                /* coefficient != 0 ? */
+    Prob ex[2][NKB][NMQ][MAXE];                 /* exponent in unary */
+    Prob mt[2][MAXE][2];                        /* mantissa: top bit / rest */
+    Prob sg[2][NKB][9];                         /* sign by neighbor signs */
     Prob dz[2][8], dsg[2][8], dex[2][8][MAXE], dmt[2][MAXE][2];   /* DC-Rest */
 } Model;
 static void model_init(Model *m) { Prob *p = (Prob *)m; for (size_t i = 0; i < sizeof *m / sizeof *p; i++) { p[i].f = 32768; p[i].s = 32768; } }
@@ -306,7 +306,7 @@ static int iabs(int v) { return v < 0 ? -v : v; }
 static int qmag(int v) { return v == 0 ? 0 : v == 1 ? 1 : v == 2 ? 2 : v <= 4 ? 3 : v <= 8 ? 4 : v <= 16 ? 5 : 6; }
 static int qnz(int v) { static const int T[NNZ - 1] = {0, 1, 2, 3, 4, 6, 9, 14, 22, 34}; int c = 0; while (c < NNZ - 1 && v > T[c]) c++; return c; }
 
-/* Betrag >= 1 mit Exponent (unär) + Mantisse */
+/* magnitude >= 1 with exponent (unary) + mantissa */
 static int code_mag(AC *a, Prob *ex, Prob (*mt)[2], int v) {
     int e = 0;
     if (!a->dec) { while ((v >> (e + 1)) && e < MAXE - 1) e++; }
@@ -319,13 +319,13 @@ static int code_mag(AC *a, Prob *ex, Prob (*mt)[2], int v) {
 }
 static int nzcount(const i16 *b) { int c = 0; for (int k = 1; k < 64; k++) c += b[k] != 0; return c; }
 
-/* Alle Koeffizienten einer Komponente kodieren/dekodieren (Rasterreihenfolge der Blöcke) */
+/* Encode/decode all coefficients of a component (blocks in raster order) */
 static int code_comp(AC *a, Model *m, Comp *c, int cls) {
     for (int r = 0; r < c->bh; r++)
         for (int col = 0; col < c->bw; col++) {
             i16 *b = c->coef + ((size_t)r * c->bw + col) * 64;
             const i16 *A = r ? b - (size_t)c->bw * 64 : NULL, *L = col ? b - 64 : NULL, *AL = (r && col) ? b - (size_t)c->bw * 64 - 64 : NULL;
-            /* DC: Vorhersage MED(A, L, AL) */
+            /* DC: prediction MED(A, L, AL) */
             int pa = A ? A[0] : (L ? L[0] : 0), pl = L ? L[0] : pa, pal = AL ? AL[0] : pa;
             int mx = pa > pl ? pa : pl, mn = pa < pl ? pa : pl;
             int pred = pal >= mx ? mn : (pal <= mn ? mx : pa + pl - pal);
@@ -337,14 +337,14 @@ static int code_comp(AC *a, Model *m, Comp *c, int cls) {
                 dr = neg ? -mag : mag;
             } else dr = 0;
             if (a->dec) { int v = pred + dr; if (v < -32768 || v > 32767) return 0; b[0] = (i16)v; }
-            /* Anzahl Nicht-Null-AC: Kontext aus den Nachbarn */
+            /* number of non-zero AC coefficients: context from the neighbors */
             int na = A ? nzcount(A) : -1, nl = L ? nzcount(L) : -1;
             int avg = na < 0 ? (nl < 0 ? 0 : nl) : (nl < 0 ? na : (na + nl + 1) / 2);
             int nzq = qnz(avg);
             int nnz = a->dec ? 0 : nzcount(b), node = 1;
             for (int bit = 5; bit >= 0; bit--) node = (node << 1) | cbit(a, &m->nz[cls][nzq][node], (nnz >> bit) & 1);
             nnz = node - 64;
-            /* AC in Zickzack-Reihenfolge, bis alle Nicht-Null-Werte kodiert sind */
+            /* AC in zigzag order until all non-zero values are coded */
             int rem = nnz;
             for (int k = 1; k < 64 && rem > 0; k++) {
                 int ma = A ? iabs(A[k]) : -1, ml = L ? iabs(L[k]) : -1;
@@ -352,7 +352,7 @@ static int code_comp(AC *a, Model *m, Comp *c, int cls) {
                 int mq = qmag(mag), rq = rem > NRQ ? NRQ - 1 : rem - 1, kb = KB[k];
                 if (rem > 63 - k + 1) return 0;
                 int v = a->dec ? 0 : b[k];
-                /* Muss der Koeffizient nicht-null sein (nur noch so viele Positionen wie Werte)? */
+                /* Must the coefficient be non-zero (only as many positions left as values)? */
                 int isnz = (rem == 64 - k) ? 1 : cbit(a, &m->zero[cls][kb][mq][rq], v != 0);
                 if (!isnz) { if (a->dec) b[k] = 0; continue; }
                 int sa = A ? (A[k] > 0) - (A[k] < 0) : 0, sl = L ? (L[k] > 0) - (L[k] < 0) : 0;
@@ -368,7 +368,7 @@ static int code_comp(AC *a, Model *m, Comp *c, int cls) {
 }
 
 /* ======================================================================= */
-/* Öffentliche Funktionen                                                   */
+/* Public functions                                                         */
 /* ======================================================================= */
 static void wr32(u8 *p, u32 v) { memcpy(p, &v, 4); }
 static u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
@@ -379,7 +379,7 @@ uint8_t *jpgx_forward(const uint8_t *jpg, size_t n, size_t *tsize) {
     if (!alloc_coefs(&J)) { free_coefs(&J); return NULL; }
     u8 *t = NULL;
     if (!decode_scan(jpg, n, &J, &scan_end)) goto done;
-    /* nach dem Scan muss EOI folgen (Rest wird unverändert übernommen) */
+    /* EOI must follow the scan (the rest is copied unchanged) */
     if (scan_end + 2 > n || jpg[scan_end] != 0xFF || jpg[scan_end + 1] != 0xD9) goto done;
     Model *m = malloc(sizeof(Model));
     if (!m) goto done;
@@ -399,7 +399,7 @@ uint8_t *jpgx_forward(const uint8_t *jpg, size_t n, size_t *tsize) {
     wr32(t + 8 + head, (u32)tail); memcpy(t + 12 + head, jpg + scan_end, tail);
     wr32(t + 12 + head + tail, (u32)a.n); memcpy(t + 16 + head + tail, a.out, a.n);
     free(a.out);
-    /* Sicherheitsnetz: vollständige Rekonstruktion prüfen */
+    /* safety net: check the complete reconstruction */
     u8 *chk = malloc(n);
     int good = chk && jpgx_inverse(t, tn, chk, n) && !memcmp(chk, jpg, n);
     free(chk);

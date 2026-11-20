@@ -17,6 +17,6 @@ int main(int argc,char**argv){
     size_t xs=0;unsigned char*x=malloc(n+n/2+1024);
     lzma_easy_buffer_encode(9|LZMA_PRESET_EXTREME,LZMA_CHECK_NONE,NULL,s,n,x,&xs,n+n/2+1024);
     printf("%-26s %9zu  lzrc %9zu (%5.2fx, c %5.1f MB/s, d %6.1f MB/s) %s | xz-9e %9zu (%5.2fx)  lzrc/xz %.3f\n",
-      strrchr(argv[a],'/')+1,n,cs,(double)n/cs,n/tc/1e6,n/td/1e6,ok?"OK":"FEHLER",xs,(double)n/xs,(double)cs/xs);
+      strrchr(argv[a],'/')+1,n,cs,(double)n/cs,n/tc/1e6,n/td/1e6,ok?"OK":"ERROR",xs,(double)n/xs,(double)cs/xs);
   }
 }

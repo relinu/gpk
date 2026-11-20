@@ -1,4 +1,4 @@
-/* Größenschätzung für x86-Split-Varianten (nur Encoder, LZRC Stufe 9). */
+/* Size estimate for x86 split variants (encoder only, LZRC level 9). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +9,7 @@ static size_t pack(const u8 *d, size_t n) { static u8 *z; static size_t c; if (l
     lzrc_params p; lzrc_default_params(&p, 9); return n ? lzrc_compress(d, n, z, c, &p) : 0; }
 static u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
 static u32 absv(u32 v, u32 pos) { if ((v >> 24) && (v >> 24) != 0xFF) return v; v = (v + pos) & 0x1FFFFFF; if (v & 0x1000000) v |= 0xFE000000; return v; }
-/* mode bits: 1=Jcc mitnehmen, 2=Big Endian, 4=selektiv (nur 00/FF) + Bitmaske, 8=Ströme getrennt komprimieren, 16=CALL/JMP getrennte Ströme */
+/* mode bits: 1=include Jcc, 2=big endian, 4=selective (only 00/FF) + bit mask, 8=compress streams separately, 16=CALL/JMP in separate streams */
 static size_t variant(const u8 *in, size_t n, int mode) {
     u8 *mainb = malloc(n), *ops = malloc(n), *ops2 = malloc(n), *bits = calloc(n / 8 + 1, 1);
     size_t i = 0, mp = 0, op = 0, op2 = 0, nb = 0;
@@ -38,8 +38,8 @@ static size_t variant(const u8 *in, size_t n, int mode) {
 }
 int main(int argc, char **argv) {
     static const int M[] = {3, 1, 2, 7, 11, 15, 27, 31, 15 & ~1};
-    static const char *N[] = {"aktuell (Jcc, BE, alles verschieben)", "Little Endian", "ohne Jcc", "+ selektiv mit Bitmaske",
-                              "+ Ströme getrennt komprimiert", "selektiv + getrennt", "getrennt + CALL/JMP getrennt", "selektiv + getrennt + CALL/JMP getrennt", "selektiv + getrennt, ohne Jcc"};
+    static const char *N[] = {"current (Jcc, BE, move everything)", "little endian", "without Jcc", "+ selective with bit mask",
+                              "+ streams compressed separately", "selective + separate", "separate + CALL/JMP separate", "selective + separate + CALL/JMP separate", "selective + separate, without Jcc"};
     size_t tot[9] = {0};
     for (int a = 1; a < argc; a++) {
         FILE *f = fopen(argv[a], "rb"); fseek(f, 0, SEEK_END); size_t n = ftell(f); fseek(f, 0, SEEK_SET);

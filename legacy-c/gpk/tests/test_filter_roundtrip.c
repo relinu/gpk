@@ -11,5 +11,5 @@ int main(void){ srand(1); int fails=0, runs=0;
   if(f.id==FT_WPRED){ int W=(rand()%2)?2:4; f.fields[0]=W; f.fields[1]=1+rand()%2; f.fields[2]=rand()%2; f.stride=W*(1+rand()%16); }
   if(f.id==FT_SPLIT){ f.nfields=1+rand()%6; for(int k=0;k<f.nfields;k++) f.fields[k]=1+rand()%8; f.skip=rand()%300; }
   filter_encode(&f,a,b,n,off); memcpy(c,b,n); filter_decode(&f,c,d,n,off);
-  runs++; if(memcmp(a,d,n)){ fails++; if(fails<5) printf("FEHLER filter=%s n=%zu off=%llu\n",FILTER_NAMES[f.id],n,off);} }
- printf("%d Filter-Roundtrips, %d Fehler\n",runs,fails); return fails!=0; }
+  runs++; if(memcmp(a,d,n)){ fails++; if(fails<5) printf("ERROR filter=%s n=%zu off=%llu\n",FILTER_NAMES[f.id],n,off);} }
+ printf("%d filter round trips, %d errors\n",runs,fails); return fails!=0; }

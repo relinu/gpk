@@ -1,5 +1,5 @@
 /* Benchmark: GLZ vs. zlib, bzip2, xz (LZMA2), zstd, LZ4/LZ4HC.
- * Ausgabe: CSV auf stdout. Jede Runde wird per memcmp verifiziert. */
+ * Output: CSV on stdout. Every round is verified with memcmp. */
 #define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +10,7 @@
 #include <lzma.h>
 #include "glz.h"
 
-/* zstd / lz4: nur Laufzeitbibliotheken vorhanden -> Prototypen selbst deklarieren */
+/* zstd / lz4: only the runtime libraries are available -> declare the prototypes ourselves */
 size_t ZSTD_compress(void *, size_t, const void *, size_t, int);
 size_t ZSTD_decompress(void *, size_t, const void *, size_t);
 size_t ZSTD_compressBound(size_t);
@@ -66,7 +66,7 @@ static const Codec CODECS[] = {
     {"GLZ -1",          c_glz,   d_glz,  1},
     {"GLZ -5",          c_glz,   d_glz,  5},
     {"GLZ -9",          c_glz,   d_glz,  9},
-    {"GLZ -9 (ohne Filter)", c_glznf, d_glz, 9},
+    {"GLZ -9 (no filter)", c_glznf, d_glz, 9},
     {"LZ4",             c_lz4,   d_lz4,  0},
     {"LZ4HC -12",       c_lz4,   d_lz4,  12},
     {"zlib -6",         c_zlib,  d_zlib, 6},
@@ -103,11 +103,11 @@ int main(int argc, char **argv) {
                 snprintf(filt, sizeof filt, "none=%u delta=%u shuf=%u shufdelta=%u stored=%u",
                          st->filter_count[0], st->filter_count[1], st->filter_count[2], st->filter_count[3], st->filter_count[4]);
             }
-            if (!cs) { fprintf(stderr, "%s: %s Kompression fehlgeschlagen\n", base, cd->name); return 1; }
+            if (!cs) { fprintf(stderr, "%s: %s compression failed\n", base, cd->name); return 1; }
             size_t ds = 0; reps = 0; t0 = now(); double td;
             do { ds = cd->d(cmp, cs, back, n + 64); reps++; } while ((td = now() - t0) < 0.3 && reps < 2000);
             td /= reps;
-            if (ds != n || memcmp(src, back, n)) { fprintf(stderr, "%s: %s ROUNDTRIP FEHLER\n", base, cd->name); return 1; }
+            if (ds != n || memcmp(src, back, n)) { fprintf(stderr, "%s: %s ROUNDTRIP ERROR\n", base, cd->name); return 1; }
             printf("%s,%s,%zu,%zu,%.4f,%.2f,%.2f,%s\n", base, cd->name, n, cs, (double)n / cs,
                    n / tc / 1e6, n / td / 1e6, filt);
             fflush(stdout);

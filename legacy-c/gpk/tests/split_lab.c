@@ -1,4 +1,4 @@
-/* Feld-Split-Varianten für DDS testen: split_lab <datei.dds> */
+/* Test field split variants for DDS: split_lab <file.dds> */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

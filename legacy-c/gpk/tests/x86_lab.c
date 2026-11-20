@@ -1,4 +1,4 @@
-/* x86-Labor: kein Filter vs. BCJ vs. x86-Split, je Datei mit LZRC (Stufe 9) */
+/* x86 lab: no filter vs. BCJ vs. x86 split, per file with LZRC (level 9) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +17,10 @@ int main(int argc, char **argv) {
             lzrc_params p; lzrc_default_params(&p, 9);
             tot[k] += lzrc_compress(t, n, z, lzrc_bound(n), &p);
             filter_decode(&fs, t, r, n, 0);
-            if (memcmp(d, r, n)) { printf("ROUNDTRIP-FEHLER %s\n", argv[a]); return 1; }
+            if (memcmp(d, r, n)) { printf("ROUNDTRIP ERROR %s\n", argv[a]); return 1; }
         }
         free(d); free(t); free(z); free(r);
     }
-    printf("roh %.2f MB | kein Filter %.3f MB | BCJ %.3f MB | x86-Split %.3f MB (%+.1f %% ggü. BCJ)\n",
+    printf("raw %.2f MB | no filter %.3f MB | BCJ %.3f MB | x86 split %.3f MB (%+.1f %% vs. BCJ)\n",
            raw / 1e6, tot[0] / 1e6, tot[1] / 1e6, tot[2] / 1e6, 100.0 * ((double)tot[2] / tot[1] - 1));
 }

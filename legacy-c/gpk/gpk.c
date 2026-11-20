@@ -1,22 +1,22 @@
 /*
- * GPK – Download-Packer für komplette Spiel-Builds.
+ * GPK – download packer for complete game builds (C reference implementation).
  *
- *   gpk c [Optionen] <build-ordner> <archiv.gpk>    packen
- *   gpk x [-t N] <archiv.gpk> <ziel-ordner>          entpacken (parallel, CRC-geprüft)
- *   gpk l <archiv.gpk>                               Inhalt auflisten
+ *   gpk c [options] <build-dir> <archive.gpk>       pack
+ *   gpk x [-t N] <archive.gpk> <target-dir>          unpack (parallel, CRC-checked)
+ *   gpk l <archive.gpk>                              list the contents
  *
- * Pipeline beim Packen:
- *   1. Ordner scannen (Dateien, Ordner, Symlinks, Rechte, Zeitstempel)
- *   2. Deduplizieren: identische Dateien (CRC32 + Größe + Bytevergleich) nur 1x
- *   3. Klassifizieren je Datei: Text, x86-Code, BCn-Textur (DDS), Binärdaten,
- *      bereits komprimiert (Ogg, Video, PNG ...) -> wird nur gespeichert
- *   4. Filter je Datei per Probekompression wählen (BCJ, Feld-Split, Delta, Shuffle)
- *   5. Sortieren nach Klasse/Endung/Name, damit ähnliche Dateien im selben
- *      Fenster landen (dateiübergreifende Matches)
- *   6. Solide Blöcke (Standard 64 MiB) parallel mit LZRC komprimieren
+ * Pipeline when packing:
+ *   1. Scan the directory (files, directories, symlinks, permissions, timestamps)
+ *   2. Deduplicate: identical files (CRC32 + size + byte comparison) only once
+ *   3. Classify each file: text, x86 code, BCn texture (DDS), binary data,
+ *      already compressed (Ogg, video, PNG ...) -> only stored
+ *   4. Choose a filter per file by trial compression (BCJ, field split, delta, shuffle)
+ *   5. Sort by class/extension/name so that similar files end up in the same
+ *      window (matches across files)
+ *   6. Compress solid blocks (default 64 MiB) in parallel with LZRC
  *
- * Archivformat (Little Endian):
- *   "GPK1" | u64 index_off | u64 index_csize | u64 index_usize | u8 index_codec | Blöcke | Index
+ * Archive format (little endian):
+ *   "GPK1" | u64 index_off | u64 index_csize | u64 index_usize | u8 index_codec | blocks | index
  */
 #define _GNU_SOURCE
 #ifdef _WIN32
@@ -33,7 +33,7 @@
 #include <pthread.h>
 #include <zlib.h>
 #ifndef GPK_NO_XZ
-#include <lzma.h>                 /* nur für den optionalen --xz-Kern */
+#include <lzma.h>                 /* only for the optional --xz core */
 #endif
 #include "platform.h"
 #include "lzrc.h"
@@ -46,35 +46,35 @@
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64; typedef int64_t i64;
 
 #define NONE        0xFFFFFFFFu
-#define SAMPLE      (384u << 10)   /* Stichprobe für Filter-Probeläufe */
+#define SAMPLE      (384u << 10)   /* sample for filter trial runs */
 #define HDR_SIZE    (4 + 8 + 8 + 8 + 1)
 
 enum { CODEC_STORED = 0, CODEC_LZRC = 1, CODEC_XZ = 2, CODEC_TCM = 3 };
 enum { CL_TEXT, CL_EXE, CL_TEXTURE, CL_BINARY, CL_RAW, CL_N };
-static const char *const CLASS_NAMES[CL_N] = {"Text/Skripte", "x86-Programmcode", "BCn-Texturen (DDS)", "sonstige Binärdaten", "bereits komprimiert"};
+static const char *const CLASS_NAMES[CL_N] = {"text/scripts", "x86 code", "BCn textures (DDS)", "other binary data", "already compressed"};
 enum { E_FILE = 0, E_DIR = 1, E_LINK = 2 };
 
 static void die(const char *fmt, const char *arg) { fprintf(stderr, "gpk: "); fprintf(stderr, fmt, arg); fprintf(stderr, "\n"); exit(1); }
 static double now(void) { return plat_now(); }
-/* Pfad zusammensetzen; zu lange Pfade sind ein Fehler statt still abgeschnitten zu werden. */
+/* Join a path; paths that are too long are an error instead of being truncated silently. */
 static void join(char *out, size_t cap, const char *a, const char *sep, const char *b) {
-    if ((size_t)snprintf(out, cap, "%s%s%s", a, sep, b) >= cap) die("Pfad zu lang: %s", b);
+    if ((size_t)snprintf(out, cap, "%s%s%s", a, sep, b) >= cap) die("path too long: %s", b);
 }
-static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("%s", "Speicher voll"); return p; }
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("%s", "out of memory"); return p; }
 
-/* ---------------- Optionen ---------------- */
+/* ---------------- Options ---------------- */
 static u64 g_block = 64ull << 20;
 static int g_threads = 4, g_level = 9;
 static const u64 g_block_max_ssize = 1ull << 30;
 static int opt_filter = 1, opt_sort = 1, opt_dedup = 1, opt_raw = 1, opt_codec = CODEC_LZRC;
-static double opt_max_ram_gb = 0;            /* 0 = keine Vorgabe */
-static int opt_cm = 1;                       /* Text-Kern TCM für Textblöcke */
+static double opt_max_ram_gb = 0;            /* 0 = no limit */
+static int opt_cm = 1;                       /* text core TCM for text blocks */
 
-/* ---------------- Datenstrukturen ---------------- */
+/* ---------------- Data structures ---------------- */
 typedef struct { char *path; int type; u32 mode; i64 mtime; u64 size; u32 crc; u32 content; char *link; } Entry;
-/* Inhalte werden nicht dauerhaft im Speicher gehalten: Originaldateien werden nur für den
- * jeweiligen Arbeitsschritt eingeblendet, umgewandelte Daten (PNG) liegen in einer
- * Auslagerungsdatei (spill_off). ssize = Größe des zu komprimierenden Datenstroms. */
+/* Contents are not kept in memory permanently: original files are only mapped for the
+ * current processing step, transformed data (PNG/JPEG) lives in a spill file
+ * (spill_off). ssize = size of the stream to compress. */
 typedef struct { u64 size; u32 crc; fspec f; int cls; const char *ext, *base, *path; int xform; u64 ssize; u64 spill_off; } Content;
 enum { XF_NONE = 0, XF_PNG = 1, XF_JPG = 2 };
 typedef struct { u32 content; u64 off; u32 len; } Piece;
@@ -84,9 +84,9 @@ static Entry *E; static u32 nE, capE;
 static Content *C; static u32 nC;
 static Block *B; static u32 nB, capB;
 
-/* ---------------- Speicherschonender Zugriff ---------------- */
-static const char *g_root;                         /* Build-Ordner beim Packen */
-static char g_spill_path[GPK_PATH];                /* Auslagerungsdatei für umgewandelte Daten */
+/* ---------------- Memory-saving access ---------------- */
+static const char *g_root;                         /* build directory when packing */
+static char g_spill_path[GPK_PATH];                /* spill file for transformed data */
 static int g_spill_fd = -1;
 static u64 g_spill_end;
 static const u8 *g_spill_map;
@@ -94,47 +94,47 @@ static pthread_mutex_t g_spill_mx = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct { const u8 *p; const u8 *map; u64 maplen; } View;
 
-/* Originaldatei eines Inhalts einblenden (nur solange gebraucht). */
+/* Map the original file of a content (only as long as needed). */
 static View view_original(const Content *c) {
     char f[GPK_PATH]; join(f, sizeof f, g_root, "/", c->path);
     View v = {0}; v.map = plat_map(f, c->size); v.maplen = c->size; v.p = v.map;
-    if (!v.map) die("Kann Datei nicht lesen: %s", f);
+    if (!v.map) die("cannot read file: %s", f);
     return v;
 }
-/* Zu komprimierenden Datenstrom eines Inhalts liefern (Original oder ausgelagerte Umwandlung). */
+/* Return the stream of a content to compress (original or spilled transformation). */
 static View view_stream(const Content *c) {
     if (c->xform) { View v = {0}; v.p = g_spill_map + c->spill_off; return v; }
     return view_original(c);
 }
 static void view_close(View *v) { if (v->map) plat_unmap(v->map, v->maplen); v->map = NULL; }
 
-/* Umgewandelte Daten in die Auslagerungsdatei schreiben; liefert ihren Offset. */
+/* Write transformed data into the spill file; returns its offset. */
 static u64 spill_write(const u8 *d, u64 n) {
     pthread_mutex_lock(&g_spill_mx);
     if (g_spill_fd < 0) {
         g_spill_fd = plat_open_write(g_spill_path, 1);
-        if (g_spill_fd < 0) die("Kann Auslagerungsdatei nicht anlegen: %s", g_spill_path);
+        if (g_spill_fd < 0) die("cannot create spill file: %s", g_spill_path);
     }
     u64 off = g_spill_end;
-    if (plat_write_at(g_spill_fd, d, n, off)) die("Schreibfehler in Auslagerungsdatei: %s", g_spill_path);
+    if (plat_write_at(g_spill_fd, d, n, off)) die("write error in spill file: %s", g_spill_path);
     g_spill_end += n;
     pthread_mutex_unlock(&g_spill_mx);
     return off;
 }
 
-/* Geordneter Writer: fertige Blöcke gehen sofort in fester Reihenfolge ins Archiv
- * (deterministische Ausgabe). Threads arbeiten höchstens g_ahead Blöcke voraus,
- * damit nie mehr als ein paar fertige Blöcke auf das Schreiben warten. */
+/* Ordered writer: finished blocks go into the archive immediately in a fixed order
+ * (deterministic output). Threads work at most g_ahead blocks ahead so that never
+ * more than a few finished blocks wait to be written. */
 static FILE *g_out;
 static u64 g_out_off;
 static u32 g_next_write, g_ahead;
 static pthread_mutex_t g_wmx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_wcv = PTHREAD_COND_INITIALIZER;
 
-/* ---------------- Puffer schreiben / lesen ---------------- */
+/* ---------------- Writing / reading buffers ---------------- */
 typedef struct { u8 *p; size_t n, cap; } Buf;
 static void bput(Buf *b, const void *d, size_t n) {
-    if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 4096; b->p = realloc(b->p, b->cap); if (!b->p) die("%s", "Speicher voll"); }
+    if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 4096; b->p = realloc(b->p, b->cap); if (!b->p) die("%s", "out of memory"); }
     memcpy(b->p + b->n, d, n); b->n += n;
 }
 #define PUT(b, T, v) do { T _t = (T)(v); bput(b, &_t, sizeof _t); } while (0)
@@ -168,9 +168,9 @@ static void parallel_for(u32 n, void (*fn)(u32, void *), void *ctx) {
     for (int i = 0; i < t; i++) pthread_join(th[i], NULL);
 }
 
-/* ---------------- Scannen ---------------- */
+/* ---------------- Scanning ---------------- */
 static void add_entry(Entry e) {
-    if (nE == capE) { capE = capE * 2 + 256; E = realloc(E, capE * sizeof(Entry)); if (!E) die("%s", "Speicher voll"); }
+    if (nE == capE) { capE = capE * 2 + 256; E = realloc(E, capE * sizeof(Entry)); if (!E) die("%s", "out of memory"); }
     E[nE++] = e;
 }
 static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
@@ -179,7 +179,7 @@ static void scan(const char *root, const char *rel) {
     char full[GPK_PATH];
     join(full, sizeof full, root, *rel ? "/" : "", rel);
     DIR *d = opendir(full);
-    if (!d) die("Kann Ordner nicht öffnen: %s", full);
+    if (!d) die("cannot open directory: %s", full);
     char **names = NULL; size_t nn = 0, cn = 0;
     struct dirent *de;
     while ((de = readdir(d))) {
@@ -194,14 +194,14 @@ static void scan(const char *root, const char *rel) {
         join(r, sizeof r, rel, *rel ? "/" : "", names[i]);
         join(f, sizeof f, root, "/", r);
         struct stat st;
-        if (lstat(f, &st)) die("stat fehlgeschlagen: %s", f);
+        if (lstat(f, &st)) die("stat failed: %s", f);
         Entry e = {0};
         e.path = strdup(r); e.mode = plat_portable_mode(st.st_mode, S_ISDIR(st.st_mode)); e.mtime = st.st_mtime; e.content = NONE;
         if (S_ISDIR(st.st_mode)) { e.type = E_DIR; add_entry(e); scan(root, r); }
         else if (S_ISREG(st.st_mode)) { e.type = E_FILE; e.size = plat_file_size(f); add_entry(e); }
         else if (S_ISLNK(st.st_mode)) {
             char t[GPK_PATH];
-            if (plat_readlink(f, t, sizeof t) < 0) die("readlink fehlgeschlagen: %s", f);
+            if (plat_readlink(f, t, sizeof t) < 0) die("readlink failed: %s", f);
             e.type = E_LINK; e.link = strdup(t); add_entry(e);
         }
         free(names[i]);
@@ -215,7 +215,7 @@ static u32 crc_of(const u8 *d, u64 n) {
     return (u32)c;
 }
 
-/* ---------------- Klassifikation & Filterwahl ---------------- */
+/* ---------------- Classification & filter choice ---------------- */
 static int is_text(const u8 *s, size_t n) {
     if (n > 65536) n = 65536;
     if (!n) return 0;
@@ -239,7 +239,7 @@ static int is_x86(const u8 *d, u64 n) {
     return 0;
 }
 
-/* DDS mit BC1..BC5: Blöcke in Feld-Streams zerlegen (Endpunkte vs. Indizes). */
+/* DDS with BC1..BC5: split the blocks into field streams (endpoints vs. indices). */
 static int dds_split(const u8 *d, u64 n, fspec *f) {
     if (n < 128 || memcmp(d, "DDS ", 4)) return 0;
     const u8 *cc = d + 84;
@@ -269,7 +269,7 @@ static double delta_entropy(const u8 *p, size_t n, int s) {
     return e;
 }
 
-/* Bewertet einen Filterkandidaten mit dem echten LZRC-Kern (schnelle Einstellung). */
+/* Rates a filter candidate with the real LZRC core (fast setting). */
 static size_t trial_size(const fspec *f, const u8 *s, size_t sn, u64 soff, u8 *tmp, u8 *out) {
     filter_encode(f, s, tmp, sn, soff);
     lzrc_params p; lzrc_default_params(&p, 2);
@@ -278,13 +278,12 @@ static size_t trial_size(const fspec *f, const u8 *s, size_t sn, u64 soff, u8 *t
 }
 
 static void add_cand(fspec *cand, int *nc, fspec f) {
-    for (int k = 0; k < *nc; k++) if (!memcmp(&cand[k], &f, sizeof f)) return;   /* Duplikate vermeiden */
+    for (int k = 0; k < *nc; k++) if (!memcmp(&cand[k], &f, sizeof f)) return;   /* avoid duplicates */
     cand[(*nc)++] = f;
 }
 
-/* PNG-Rekompression versuchen; nur übernehmen, wenn sie nach LZRC wirklich kleiner ist. */
-/* Geschätzte Größe nach LZRC; für entpackte PNG-Rohdaten mit den Filtern, die die
- * Klassifizierung später auch probieren würde (fairer Vergleich mit dem Pixel-Coder). */
+/* Estimated size after LZRC; for inflated raw PNG data with the filters that the
+ * classification would also try later (fair comparison with the pixel coder). */
 static size_t lz_estimate(const u8 *d, size_t n, int bpp) {
     lzrc_params p; lzrc_default_params(&p, 2);
     u8 *out = xmalloc(lzrc_bound(n)), *tmp = xmalloc(n);
@@ -301,18 +300,18 @@ static size_t lz_estimate(const u8 *d, size_t n, int bpp) {
     return best;
 }
 
-/* PNG-Rekompression: Variante 1 (entpackte Rohdaten, später LZRC) und Variante 2
- * (Pixel-Coder) probieren; die kleinere wird übernommen, wenn sie das Original schlägt. */
+/* PNG recompression: try variant 1 (inflated raw data, LZRC later) and variant 2
+ * (pixel coder); the smaller one is used if it beats the original. */
 static void xform_one(u32 ci, void *ctx) {
     (void)ctx;
     Content *c = &C[ci];
     if (c->size < 64) return;
     View v = view_original(c);
-    if (v.p[0] == 0xFF && v.p[1] == 0xD8 && v.p[2] == 0xFF) {   /* JPEG: verlustfreie Rekompression */
+    if (v.p[0] == 0xFF && v.p[1] == 0xD8 && v.p[2] == 0xFF) {   /* JPEG: lossless recompression */
         size_t tn = 0; u8 *t = jpgx_forward(v.p, c->size, &tn);
         view_close(&v);
         if (!t) return;
-        /* Kleine JPEGs: Kopf (Tabellen) komprimiert LZRC besser -> nur übernehmen, wenn es gewinnt */
+        /* Small JPEGs: LZRC compresses the header (tables) better -> only use it if it wins */
         size_t base = c->size;
         if (tn <= g_block && tn <= c->size * 0.97 && c->size < (1u << 20)) {
             View v2 = view_original(c);
@@ -333,12 +332,12 @@ static void xform_one(u32 ci, void *ctx) {
     u8 *t2 = t1 ? pngx_forward_mode(v.p, c->size, 2, &t2n) : NULL;
     view_close(&v);
     size_t z1 = t1 && t1n <= g_block ? lz_estimate(t1, t1n, bpp) : (size_t)-1;
-    size_t z2 = t2 && t2n <= g_block ? t2n : (size_t)-1;   /* bereits entropiekodiert */
+    size_t z2 = t2 && t2n <= g_block ? t2n : (size_t)-1;   /* already entropy-coded */
     u8 *t = z2 < z1 ? t2 : t1;
     size_t tn = z2 < z1 ? t2n : t1n, z = z2 < z1 ? z2 : z1;
     if (t == t1) free(t2); else free(t1);
     if (!t || z == (size_t)-1 || z > c->size * 0.97) { free(t); return; }
-    c->spill_off = spill_write(t, tn);                 /* auslagern statt im RAM halten */
+    c->spill_off = spill_write(t, tn);                 /* spill instead of keeping it in RAM */
     c->xform = XF_PNG; c->ssize = tn;
     free(t);
 }
@@ -359,7 +358,7 @@ static void classify_one(u32 ci, void *ctx) {
     if ((!opt_filter && !opt_raw) || n < 4096) { view_close(&v); return; }
 
     u8 *tmp = xmalloc(sn), *out = xmalloc(lzrc_bound(sn) > glz_bound(sn) ? lzrc_bound(sn) : glz_bound(sn));
-    /* Schneller Vortest: bereits komprimiert (Ogg, Video, PNG ...)? */
+    /* Quick pre-test: already compressed (Ogg, video, PNG ...)? */
     size_t g = glz_compress(s, sn, out, glz_bound(sn), 1, GLZ_FLAG_NO_FILTER);
     if (opt_raw && (!g || g > sn * 0.99)) { c->cls = CL_RAW; free(tmp); free(out); view_close(&v); return; }
 
@@ -372,11 +371,11 @@ static void classify_one(u32 ci, void *ctx) {
         if (is_x86(d, n)) { c->cls = CL_EXE; t = f0; t.id = FT_BCJ; add_cand(cand, &nc, t); t.id = FT_X86S; add_cand(cand, &nc, t); }
         else if (dds_split(d, n, &t)) { c->cls = CL_TEXTURE; add_cand(cand, &nc, t); }
         else {
-            /* Stride-Erkennung: die zwei Abstände mit der kleinsten Delta-Entropie */
+            /* Stride detection: the two distances with the smallest delta entropy */
             size_t en = sn < 65536 ? sn : 65536;
             int st[2] = {1, 1}; double be[2] = {1e300, 1e300};
             for (int k = 1; k <= 64; k++) {
-                double e = delta_entropy(s, en, k) * (1.0 + 0.002 * k);   /* kleine Strides leicht bevorzugen */
+                double e = delta_entropy(s, en, k) * (1.0 + 0.002 * k);   /* slightly prefer small strides */
                 if (e < be[0]) { be[1] = be[0]; st[1] = st[0]; be[0] = e; st[0] = k; }
                 else if (e < be[1]) { be[1] = e; st[1] = k; }
             }
@@ -420,7 +419,7 @@ static int cmp_content(const void *a, const void *b) {
     return strcmp(x->path, y->path);
 }
 
-/* ---------------- Blöcke ---------------- */
+/* ---------------- Blocks ---------------- */
 static Block *new_block(int codec) {
     if (nB == capB) { capB = capB * 2 + 16; B = realloc(B, capB * sizeof(Block)); }
     Block *b = &B[nB++]; memset(b, 0, sizeof *b); b->codec = codec;
@@ -437,12 +436,12 @@ static void build_blocks(const u32 *order, int raw) {
     for (u32 k = 0; k < nC; k++) {
         Content *c = &C[order[k]];
         if ((c->cls == CL_RAW) != raw) continue;
-        /* Text mit Context-Mixing-Kern: kleinere Blöcke (8 MiB) für paralleles Entpacken –
-         * gemessen ohne Verlust an Kompression, da das Modell schnell lernt */
+        /* Text with the context-mixing core: smaller blocks (8 MiB) for parallel unpacking –
+         * measured without loss of compression because the model learns quickly */
         u64 cap = (opt_cm && opt_codec == CODEC_LZRC && c->cls == CL_TEXT && g_block > (8ull << 20)) ? (8ull << 20) : g_block;
         for (u64 off = 0; off < c->ssize;) {
             u32 len = (u32)((c->ssize - off) < cap ? (c->ssize - off) : cap);
-            /* Text und Nicht-Text nicht mischen: reine Textblöcke bekommen den Text-Kern */
+            /* Do not mix text and non-text: pure text blocks get the text core */
             int is_text = c->cls == CL_TEXT;
             if (!b || (b->usize + len > cap && b->np) || (b->np && is_text != last_text))
                 b = new_block(raw ? CODEC_STORED : opt_codec);
@@ -456,7 +455,7 @@ static void build_blocks(const u32 *order, int raw) {
 static void compress_block(u32 bi, void *ctx) {
     (void)ctx;
     Block *b = &B[bi];
-    pthread_mutex_lock(&g_wmx);                        /* nicht zu weit vorauslaufen */
+    pthread_mutex_lock(&g_wmx);                        /* do not run too far ahead */
     while (bi >= g_next_write + g_ahead) pthread_cond_wait(&g_wcv, &g_wmx);
     pthread_mutex_unlock(&g_wmx);
     u8 *buf = xmalloc(b->usize);
@@ -472,11 +471,11 @@ static void compress_block(u32 bi, void *ctx) {
     size_t cs = 0; u8 *out = NULL;
     if (b->codec == CODEC_LZRC) {
         lzrc_params pr; lzrc_default_params(&pr, g_level);
-        if (text * 2 > b->usize) { pr.lc = 4; pr.pb = 0; }       /* Text: mehr Literal-Kontext */
+        if (text * 2 > b->usize) { pr.lc = 4; pr.pb = 0; }       /* text: more literal context */
         size_t cap = lzrc_bound(b->usize);
         out = xmalloc(cap);
         cs = lzrc_compress(buf, b->usize, out, cap, &pr);
-        /* Überwiegend Text: zusätzlich mit dem Context-Mixing-Kern versuchen, kleineres Ergebnis nehmen */
+        /* Mostly text: also try the context-mixing core, take the smaller result */
         if (opt_cm && text * 2 > b->usize) {
             size_t tcap = tcm_bound(b->usize);
             u8 *tout = xmalloc(tcap);
@@ -495,14 +494,14 @@ static void compress_block(u32 bi, void *ctx) {
     if (!cs || cs >= b->usize) { free(out); b->codec = CODEC_STORED; b->cdata = buf; b->csize = b->usize; }
     else { free(buf); b->cdata = out; b->csize = cs; }
     fprintf(stderr, "  Block %3u/%u: %7.1f MB -> %7.1f MB  (%s)\n", bi + 1, nB, b->usize / 1e6, b->csize / 1e6,
-            b->codec == CODEC_STORED ? "gespeichert" : b->codec == CODEC_LZRC ? "LZRC" : b->codec == CODEC_TCM ? "Text-CM" : "xz");
-    /* Fertig: alle lückenlos fertigen Blöcke sofort ins Archiv schreiben und freigeben */
+            b->codec == CODEC_STORED ? "stored" : b->codec == CODEC_LZRC ? "LZRC" : b->codec == CODEC_TCM ? "text CM" : "xz");
+    /* Done: write all blocks that are finished without gaps into the archive and free them */
     pthread_mutex_lock(&g_wmx);
     b->done = 1;
     while (g_next_write < nB && B[g_next_write].done) {
         Block *w = &B[g_next_write];
         w->off = g_out_off;
-        if (fwrite(w->cdata, 1, w->csize, g_out) != w->csize) die("%s", "Schreibfehler (Platte voll?)");
+        if (fwrite(w->cdata, 1, w->csize, g_out) != w->csize) die("%s", "write error (disk full?)");
         g_out_off += w->csize;
         free(w->cdata); w->cdata = NULL;
         g_next_write++;
@@ -526,7 +525,7 @@ static fspec read_fspec(Rd *r) {
 }
 static void put_str(Buf *ix, const char *s) { u16 l = (u16)strlen(s); PUT(ix, u16, l); bput(ix, s, l); }
 
-/* ---------------- Packen ---------------- */
+/* ---------------- Packing ---------------- */
 static int cmp_dedup(const void *a, const void *b) {
     const Entry *x = &E[*(const u32 *)a], *y = &E[*(const u32 *)b];
     if (x->size != y->size) return x->size < y->size ? -1 : 1;
@@ -539,25 +538,25 @@ static void hash_one(u32 i, void *ctx) {
     if (e->type != E_FILE || !e->size) return;
     char f[GPK_PATH]; join(f, sizeof f, ((HashCtx *)ctx)->root, "/", e->path);
     const u8 *m = plat_map(f, e->size);
-    if (!m) die("Kann Datei nicht lesen: %s", f);
+    if (!m) die("cannot read file: %s", f);
     e->crc = crc_of(m, e->size);
     plat_unmap(m, e->size);
 }
 
-/* Bytevergleich zweier Dateien (für die Deduplizierung), jeweils nur kurz eingeblendet. */
+/* Byte comparison of two files (for deduplication), each only mapped briefly. */
 static int same_file(const char *pa, const char *pb, u64 n) {
     char fa[GPK_PATH], fb[GPK_PATH];
     join(fa, sizeof fa, g_root, "/", pa); join(fb, sizeof fb, g_root, "/", pb);
     const u8 *a = plat_map(fa, n), *b = plat_map(fb, n);
-    if (!a || !b) die("Kann Datei nicht lesen: %s", !a ? fa : fb);
+    if (!a || !b) die("cannot read file: %s", !a ? fa : fb);
     int eq = !memcmp(a, b, n);
     plat_unmap(a, n); plat_unmap(b, n);
     return eq;
 }
 
-/* Speicherbedarf beim Packen (Schätzung): je Thread arbeitet der Kompressor auf einem Block
- * (LZRC: Binärbaum 8 Byte/Position + Ein-/Ausgabepuffer ~ 10,2 x Blockgröße; xz -9e ~ 674 MiB
- * + 2,1 x Blockgröße). Dazu höchstens g_ahead fertige Blöcke, die auf das Schreiben warten. */
+/* Memory needed for packing (estimate): per thread the compressor works on one block
+ * (LZRC: binary tree 8 bytes/position + input/output buffers ~ 10.2 x block size; xz -9e ~ 674 MiB
+ * + 2.1 x block size). Plus at most g_ahead finished blocks waiting to be written. */
 static double est_ram(int threads, u64 block) {
     double per = opt_codec == CODEC_XZ ? 674.0 * (1 << 20) + 2.1 * block : 10.2 * block + 6.0 * (1 << 20);
     return threads * per + (threads + 1) * (double)block + 96.0 * (1 << 20);
@@ -568,11 +567,11 @@ static void plan_memory(void) {
         while (g_threads > 1 && est_ram(g_threads, g_block) > budget) g_threads--;
         while (est_ram(g_threads, g_block) > budget && g_block > (4ull << 20)) g_block /= 2;
         if (est_ram(g_threads, g_block) > budget)
-            fprintf(stderr, "gpk: Warnung: --max-ram %.1f GB ist auch mit 1 Thread und 4 MiB Blöcken nicht einhaltbar\n", opt_max_ram_gb);
+            fprintf(stderr, "gpk: warning: --max-ram %.1f GB cannot be met even with 1 thread and 4 MiB blocks\n", opt_max_ram_gb);
     }
-    fprintf(stderr, "Speicherplanung: %d Threads, Blockgröße %llu MiB, geschätzter Spitzen-RAM ~%.0f MB%s\n",
+    fprintf(stderr, "Memory plan: %d threads, block size %llu MiB, estimated peak RAM ~%.0f MB%s\n",
             g_threads, (unsigned long long)(g_block >> 20), est_ram(g_threads, g_block) / 1e6,
-            opt_max_ram_gb > 0 ? "" : " (begrenzen mit --max-ram GB)");
+            opt_max_ram_gb > 0 ? "" : " (limit with --max-ram GB)");
 }
 
 static int cmd_compress(const char *dir, const char *outpath) {
@@ -583,7 +582,7 @@ static int cmd_compress(const char *dir, const char *outpath) {
     HashCtx hc = {dir};
     parallel_for(nE, hash_one, &hc);
 
-    /* Deduplizieren */
+    /* Deduplicate */
     u32 *fi = xmalloc(sizeof(u32) * (nE + 1)); u32 nf = 0;
     for (u32 i = 0; i < nE; i++) if (E[i].type == E_FILE && E[i].size) fi[nf++] = i;
     qsort(fi, nf, sizeof *fi, cmp_dedup);
@@ -607,14 +606,14 @@ static int cmd_compress(const char *dir, const char *outpath) {
     }
     free(fi);
 
-    /* Umwandlungen (PNG-/JPEG-Rekompression), dann klassifizieren & Filter wählen */
+    /* Transformations (PNG/JPEG recompression), then classify & choose filters */
     for (u32 i = 0; i < nC; i++) C[i].ssize = C[i].size;
-    if ((size_t)snprintf(g_spill_path, sizeof g_spill_path, "%s.auslagerung.tmp", outpath) >= sizeof g_spill_path) die("Pfad zu lang: %s", outpath);
+    if ((size_t)snprintf(g_spill_path, sizeof g_spill_path, "%s.spill.tmp", outpath) >= sizeof g_spill_path) die("path too long: %s", outpath);
     if (opt_filter) parallel_for(nC, xform_one, NULL);
-    if (g_spill_fd >= 0) {                             /* Auslagerungsdatei nur lesend einblenden */
+    if (g_spill_fd >= 0) {                             /* map the spill file read-only */
         plat_close(g_spill_fd); g_spill_fd = -1;
         g_spill_map = plat_map(g_spill_path, g_spill_end);
-        if (!g_spill_map) die("Kann Auslagerungsdatei nicht lesen: %s", g_spill_path);
+        if (!g_spill_map) die("cannot read spill file: %s", g_spill_path);
     }
     u32 npng = 0, njpg = 0; u64 png_bytes = 0, jpg_bytes = 0, jpg_after = 0;
     for (u32 i = 0; i < nC; i++) {
@@ -623,36 +622,36 @@ static int cmd_compress(const char *dir, const char *outpath) {
     }
     parallel_for(nC, classify_one, NULL);
 
-    /* Sortieren */
+    /* Sort */
     u32 *order = xmalloc(sizeof(u32) * (nC + 1));
     for (u32 i = 0; i < nC; i++) order[i] = i;
     if (opt_sort) qsort(order, nC, sizeof *order, cmp_content);
 
-    /* Statistik */
+    /* Statistics */
     u64 cls_bytes[CL_N] = {0}; u32 cls_files[CL_N] = {0}; u32 filt_cnt[FT_COUNT] = {0};
     for (u32 i = 0; i < nC; i++) { cls_bytes[C[i].cls] += C[i].size; cls_files[C[i].cls]++; filt_cnt[C[i].f.id]++; }
-    fprintf(stderr, "Build: %u Einträge, %.1f MB in Dateien\n", nE, total / 1e6);
-    fprintf(stderr, "Deduplizierung: %u doppelte Dateien, %.1f MB gespart\n", dup_files, dup_bytes / 1e6);
+    fprintf(stderr, "Build: %u entries, %.1f MB in files\n", nE, total / 1e6);
+    fprintf(stderr, "Deduplication: %u duplicate files, %.1f MB saved\n", dup_files, dup_bytes / 1e6);
     for (int k = 0; k < CL_N; k++)
-        if (cls_files[k]) fprintf(stderr, "  %-24s %5u Dateien %9.1f MB\n", CLASS_NAMES[k], cls_files[k], cls_bytes[k] / 1e6);
-    if (npng) fprintf(stderr, "PNG-Rekompression: %u Dateien (%.1f MB) bitgenau umkehrbar\n", npng, png_bytes / 1e6);
-    if (njpg) fprintf(stderr, "JPEG-Rekompression: %u Dateien, %.1f -> %.1f MB (%.1f %%), bitgenau umkehrbar\n",
+        if (cls_files[k]) fprintf(stderr, "  %-24s %5u files %9.1f MB\n", CLASS_NAMES[k], cls_files[k], cls_bytes[k] / 1e6);
+    if (npng) fprintf(stderr, "PNG recompression: %u files (%.1f MB), bit-exact reversible\n", npng, png_bytes / 1e6);
+    if (njpg) fprintf(stderr, "JPEG recompression: %u files, %.1f -> %.1f MB (%.1f %%), bit-exact reversible\n",
                       njpg, jpg_bytes / 1e6, jpg_after / 1e6, 100.0 * ((double)jpg_after / jpg_bytes - 1));
     fprintf(stderr, "Filter:");
     for (int k = 0; k < FT_COUNT; k++) if (filt_cnt[k]) fprintf(stderr, " %s=%u", FILTER_NAMES[k], filt_cnt[k]);
     fprintf(stderr, "\n");
 
-    /* Blöcke bilden, parallel komprimieren und dabei fortlaufend ins Archiv schreiben */
+    /* Build blocks, compress them in parallel and write them into the archive continuously */
     build_blocks(order, 0);
     build_blocks(order, 1);
     FILE *out = fopen(outpath, "wb");
-    if (!out) die("Kann Archiv nicht schreiben: %s", outpath);
+    if (!out) die("cannot write archive: %s", outpath);
     u8 hdr[HDR_SIZE] = {0};
-    if (fwrite(hdr, 1, HDR_SIZE, out) != HDR_SIZE) die("%s", "Schreibfehler");
+    if (fwrite(hdr, 1, HDR_SIZE, out) != HDR_SIZE) die("%s", "write error");
     g_out = out; g_out_off = HDR_SIZE; g_next_write = 0;
     g_ahead = (u32)(g_threads < 1 ? 1 : g_threads) + 2;
     parallel_for(nB, compress_block, NULL);
-    if (g_next_write != nB) die("%s", "interner Fehler: nicht alle Blöcke geschrieben");
+    if (g_next_write != nB) die("%s", "internal error: not all blocks written");
     u64 off = g_out_off;
     if (g_spill_map) { plat_unmap(g_spill_map, g_spill_end); g_spill_map = NULL; }
     if (g_spill_end || g_spill_fd >= 0) plat_unlink(g_spill_path);
@@ -684,15 +683,15 @@ static int cmd_compress(const char *dir, const char *outpath) {
     memcpy(hdr + 4, &off, 8); memcpy(hdr + 12, &icz, 8); memcpy(hdr + 20, &iu, 8); hdr[28] = icodec;
     fseek(out, 0, SEEK_SET); fwrite(hdr, 1, HDR_SIZE, out);
     u64 arch = off + ics;
-    if (fclose(out)) die("%s", "Schreibfehler");
+    if (fclose(out)) die("%s", "write error");
     double dt = now() - t0;
-    fprintf(stderr, "Archiv: %.2f MB (Rate %.3f, %.1f%% des Builds), Index %.1f KB, %.1f s (%.1f MB/s)\n",
+    fprintf(stderr, "Archive: %.2f MB (ratio %.3f, %.1f%% of the build), index %.1f KB, %.1f s (%.1f MB/s)\n",
             arch / 1e6, (double)total / arch, 100.0 * arch / total, ics / 1e3, dt, total / dt / 1e6);
     return 0;
 }
 
-/* ---------------- Archiv lesen ---------------- */
-/* Das Archiv wird nicht eingeblendet: Index und Blöcke werden gezielt gelesen (konstanter RAM-Bedarf). */
+/* ---------------- Reading archives ---------------- */
+/* The archive is not mapped: index and blocks are read selectively (constant RAM requirement). */
 typedef struct { const char *path; u64 size; } Archive;
 
 static int safe_path(const char *p) {
@@ -710,33 +709,33 @@ static int safe_path(const char *p) {
 
 static void load_archive(const char *path, Archive *a) {
     u64 sz = plat_file_size(path);
-    if (sz == UINT64_MAX) die("Kann Archiv nicht öffnen: %s", path);
+    if (sz == UINT64_MAX) die("cannot open archive: %s", path);
     a->path = path; a->size = sz;
     u8 hdr[HDR_SIZE];
     int fd = plat_open_read(path);
-    if (fd < 0 || sz < HDR_SIZE || plat_read_at(fd, hdr, HDR_SIZE, 0) || memcmp(hdr, "GPK1", 4)) die("Kein GPK-Archiv: %s", path);
+    if (fd < 0 || sz < HDR_SIZE || plat_read_at(fd, hdr, HDR_SIZE, 0) || memcmp(hdr, "GPK1", 4)) die("not a GPK archive: %s", path);
     u64 ioff, ics, ius; memcpy(&ioff, hdr + 4, 8); memcpy(&ics, hdr + 12, 8); memcpy(&ius, hdr + 20, 8);
     u8 icodec = hdr[28];
-    if (ioff > a->size || ics > a->size - ioff || ius > (1ull << 32) || ics > (1ull << 32)) die("%s", "Index beschädigt");
+    if (ioff > a->size || ics > a->size - ioff || ius > (1ull << 32) || ics > (1ull << 32)) die("%s", "index corrupted");
     u8 *ic = xmalloc(ics), *ix = xmalloc(ius);
-    if (plat_read_at(fd, ic, ics, ioff)) die("%s", "Index nicht lesbar");
+    if (plat_read_at(fd, ic, ics, ioff)) die("%s", "index not readable");
     plat_close(fd);
-    if (icodec == CODEC_STORED) { if (ics != ius) die("%s", "Index beschädigt"); memcpy(ix, ic, ius); }
-    else if (!lzrc_decompress(ic, ics, ix, ius)) die("%s", "Index beschädigt");
+    if (icodec == CODEC_STORED) { if (ics != ius) die("%s", "index corrupted"); memcpy(ix, ic, ius); }
+    else if (!lzrc_decompress(ic, ics, ix, ius)) die("%s", "index corrupted");
     free(ic);
     Rd r = {ix, ix + ius, 0};
     nE = GET(&r, u32);
-    if (nE > ius) die("%s", "Index beschädigt");
+    if (nE > ius) die("%s", "index corrupted");
     E = xmalloc(sizeof(Entry) * (nE + 1));
     for (u32 i = 0; i < nE && !r.err; i++) {
         Entry *e = &E[i]; memset(e, 0, sizeof *e);
         e->type = GET(&r, u8); e->path = rstr(&r); e->mode = GET(&r, u32); e->mtime = GET(&r, i64);
         e->size = GET(&r, u64); e->content = GET(&r, u32);
         if (e->type == E_LINK) e->link = rstr(&r);
-        if (e->type > E_LINK || !safe_path(e->path)) die("Unsicherer Pfad im Archiv: %s", e->path);
+        if (e->type > E_LINK || !safe_path(e->path)) die("unsafe path in archive: %s", e->path);
     }
     nC = GET(&r, u32);
-    if (nC > ius) die("%s", "Index beschädigt");
+    if (nC > ius) die("%s", "index corrupted");
     C = xmalloc(sizeof(Content) * (nC + 1));
     for (u32 i = 0; i < nC && !r.err; i++) {
         memset(&C[i], 0, sizeof C[i]); C[i].size = GET(&r, u64); C[i].crc = GET(&r, u32); C[i].f = read_fspec(&r);
@@ -744,31 +743,31 @@ static void load_archive(const char *path, Archive *a) {
         if (C[i].xform > XF_JPG || (C[i].xform == XF_NONE && C[i].ssize != C[i].size) || (C[i].xform && C[i].ssize > g_block_max_ssize)) r.err = 1;
     }
     nB = GET(&r, u32);
-    if (nB > ius) die("%s", "Index beschädigt");
+    if (nB > ius) die("%s", "index corrupted");
     B = xmalloc(sizeof(Block) * (nB + 1));
     for (u32 i = 0; i < nB && !r.err; i++) {
         Block *b = &B[i]; memset(b, 0, sizeof *b);
         b->off = GET(&r, u64); b->csize = GET(&r, u64); b->usize = GET(&r, u64); b->codec = GET(&r, u8);
         b->np = GET(&r, u32);
-        if (b->np > ius || b->off > a->size || b->csize > a->size - b->off || b->usize > (1ull << 31)) die("%s", "Index beschädigt");
+        if (b->np > ius || b->off > a->size || b->csize > a->size - b->off || b->usize > (1ull << 31)) die("%s", "index corrupted");
         b->pc = xmalloc(sizeof(Piece) * (b->np + 1));
         u64 sum = 0;
         for (u32 k = 0; k < b->np && !r.err; k++) {
             Piece *p = &b->pc[k];
             p->content = GET(&r, u32); p->off = GET(&r, u64); p->len = GET(&r, u32);
             if (p->content >= nC || p->off > C[p->content].ssize || p->len > C[p->content].ssize - p->off ||
-                (C[p->content].xform && (p->off || p->len != C[p->content].ssize))) die("%s", "Index beschädigt");
+                (C[p->content].xform && (p->off || p->len != C[p->content].ssize))) die("%s", "index corrupted");
             sum += p->len;
         }
-        if (sum != b->usize) die("%s", "Index beschädigt");
+        if (sum != b->usize) die("%s", "index corrupted");
     }
     for (u32 i = 0; i < nE; i++)
-        if (E[i].type == E_FILE && E[i].size && (E[i].content >= nC || C[E[i].content].size != E[i].size)) die("%s", "Index beschädigt");
-    if (r.err) die("%s", "Index beschädigt");
+        if (E[i].type == E_FILE && E[i].size && (E[i].content >= nC || C[E[i].content].size != E[i].size)) die("%s", "index corrupted");
+    if (r.err) die("%s", "index corrupted");
     free(ix);
 }
 
-/* ---------------- Entpacken ---------------- */
+/* ---------------- Unpacking ---------------- */
 typedef struct { const Archive *a; const char *outdir; u32 **targets; u32 *ntargets; u32 **piece_crc; atomic_int failed; } XCtx;
 
 static void mkdirs(const char *path) {
@@ -781,10 +780,10 @@ static void extract_block(u32 bi, void *vctx) {
     XCtx *x = vctx; Block *b = &B[bi];
     u8 *src = xmalloc(b->csize + 1), *buf = xmalloc(b->usize + 16), *tmp = NULL;
     int ok = 1;
-    int afd = plat_open_read(x->a->path);              /* eigenes Handle je Block: nur diesen Block lesen */
+    int afd = plat_open_read(x->a->path);              /* own handle per block: read only this block */
     if (afd < 0 || plat_read_at(afd, src, b->csize, b->off)) ok = 0;
     if (afd >= 0) plat_close(afd);
-    if (!ok) { fprintf(stderr, "gpk: Block %u nicht lesbar\n", bi); atomic_store(&x->failed, 1); free(src); free(buf); return; }
+    if (!ok) { fprintf(stderr, "gpk: block %u not readable\n", bi); atomic_store(&x->failed, 1); free(src); free(buf); return; }
     if (b->codec == CODEC_STORED) { if (b->csize != b->usize) ok = 0; else memcpy(buf, src, b->usize); }
     else if (b->codec == CODEC_LZRC) ok = lzrc_decompress(src, b->csize, buf, b->usize);
     else if (b->codec == CODEC_TCM) ok = tcm_decompress(src, b->csize, buf, b->usize);
@@ -795,8 +794,8 @@ static void extract_block(u32 bi, void *vctx) {
     }
 #endif
     else ok = 0;
-    free(src);                                         /* komprimierte Daten werden nicht mehr gebraucht */
-    if (!ok) { fprintf(stderr, "gpk: Block %u beschädigt\n", bi); atomic_store(&x->failed, 1); free(buf); return; }
+    free(src);                                         /* the compressed data is no longer needed */
+    if (!ok) { fprintf(stderr, "gpk: block %u corrupted\n", bi); atomic_store(&x->failed, 1); free(buf); return; }
     u32 maxlen = 0;
     for (u32 k = 0; k < b->np; k++) if (b->pc[k].len > maxlen) maxlen = b->pc[k].len;
     tmp = xmalloc(maxlen + 1);
@@ -808,7 +807,7 @@ static void extract_block(u32 bi, void *vctx) {
         pos += p->len;
         const u8 *wdata = tmp; u64 wlen = p->len, woff = p->off;
         u8 *orig = NULL;
-        if (c->xform) {                                /* PNG/JPEG bitgenau wiederherstellen */
+        if (c->xform) {                                /* restore PNG/JPEG bit-exactly */
             orig = xmalloc(c->size);
             int okx = c->xform == XF_PNG ? pngx_inverse(tmp, p->len, orig, c->size) : jpgx_inverse(tmp, p->len, orig, c->size);
             if (!okx) { atomic_store(&x->failed, 1); free(orig); continue; }
@@ -840,8 +839,8 @@ static int cmd_extract(const char *archive, const char *outdir) {
         if (e->type == E_DIR) { mkdirs(f); continue; }
         if (e->type == E_LINK) continue;
         int fd = plat_open_write(f, 1);
-        if (fd < 0) die("Kann Datei nicht anlegen: %s", f);
-        if (e->size && plat_set_size(fd, e->size)) die("Kann Dateigröße nicht setzen: %s", f);
+        if (fd < 0) die("cannot create file: %s", f);
+        if (e->size && plat_set_size(fd, e->size)) die("cannot set file size: %s", f);
         plat_close(fd);
         if (e->size) {
             u32 c = e->content;
@@ -854,7 +853,7 @@ static int cmd_extract(const char *archive, const char *outdir) {
     for (u32 i = 0; i < nB; i++) x.piece_crc[i] = xmalloc(sizeof(u32) * (B[i].np + 1));
     parallel_for(nB, extract_block, &x);
 
-    /* CRC je Datei aus den Stück-CRCs kombinieren und prüfen */
+    /* Combine the per-file CRC from the piece CRCs and check it */
     u32 *crc = calloc(nC + 1, sizeof(u32));
     for (u32 i = 0; i < nB; i++)
         for (u32 k = 0; k < B[i].np; k++) {
@@ -863,14 +862,14 @@ static int cmd_extract(const char *archive, const char *outdir) {
         }
     u32 bad = 0;
     for (u32 c = 0; c < nC; c++) if (crc[c] != C[c].crc) bad++;
-    /* Symlinks, Rechte, Zeitstempel */
+    /* Symlinks, permissions, timestamps */
     for (u32 i = 0; i < nE; i++) {
         Entry *e = &E[i];
         join(f, sizeof f, outdir, "/", e->path);
         if (e->type == E_LINK) {
-            if (e->link[0] == '/') { fprintf(stderr, "gpk: absoluter Symlink übersprungen: %s\n", e->path); continue; }
+            if (e->link[0] == '/') { fprintf(stderr, "gpk: absolute symlink skipped: %s\n", e->path); continue; }
             plat_unlink(f);
-            if (plat_symlink(e->link, f)) fprintf(stderr, "gpk: Symlink nicht angelegt (auf diesem System nicht unterstützt?): %s\n", e->path);
+            if (plat_symlink(e->link, f)) fprintf(stderr, "gpk: symlink not created (not supported on this system?): %s\n", e->path);
             continue;
         }
         plat_set_mode(f, e->mode);
@@ -878,8 +877,8 @@ static int cmd_extract(const char *archive, const char *outdir) {
     }
     double dt = now() - t0;
     u64 total = 0; for (u32 i = 0; i < nE; i++) if (E[i].type == E_FILE) total += E[i].size;
-    if (bad || atomic_load(&x.failed)) { fprintf(stderr, "gpk: FEHLER – %u Dateien mit falscher Prüfsumme\n", bad); return 1; }
-    fprintf(stderr, "Entpackt: %u Einträge, %.1f MB in %.2f s (%.1f MB/s), alle CRCs OK\n", nE, total / 1e6, dt, total / dt / 1e6);
+    if (bad || atomic_load(&x.failed)) { fprintf(stderr, "gpk: ERROR – %u files with a wrong checksum\n", bad); return 1; }
+    fprintf(stderr, "Unpacked: %u entries, %.1f MB in %.2f s (%.1f MB/s), all CRCs OK\n", nE, total / 1e6, dt, total / dt / 1e6);
     return 0;
 }
 
@@ -892,25 +891,25 @@ static int cmd_list(const char *archive) {
                e->type == E_LINK ? " -> " : "", e->type == E_LINK ? e->link : "");
     }
     u64 csum = 0; for (u32 i = 0; i < nB; i++) csum += B[i].csize;
-    printf("%u Einträge, %u eindeutige Inhalte, %u Blöcke, Blockdaten %.2f MB\n", nE, nC, nB, csum / 1e6);
+    printf("%u entries, %u unique contents, %u blocks, block data %.2f MB\n", nE, nC, nB, csum / 1e6);
     return 0;
 }
 
 static void usage(void) {
     fprintf(stderr,
-        "Verwendung:\n"
-        "  gpk c [Optionen] <build-ordner> <archiv.gpk>\n"
-        "  gpk x [-t N] <archiv.gpk> <ziel-ordner>\n"
-        "  gpk l <archiv.gpk>\n"
-        "Optionen beim Packen:\n"
-        "  -l N         Stufe 1..9 (Standard 9)\n"
-        "  -t N         Threads (Standard 4)\n"
-        "  -b MiB       Blockgröße (Standard 64)\n"
-        "  --max-ram GB Speicherbudget: Threads und ggf. Blockgröße werden passend gewählt\n"
-        "  --xz         xz/LZMA2 statt LZRC als Kern (Vergleich)\n"
-        "  --no-cm      Text-Kern (Context Mixing) aus: schneller entpacken, Text größer\n"
-        "  --no-filter --no-sort --no-dedup --no-raw   einzelne Stufen abschalten\n"
-        "  --no-preproc alle Vorverarbeitungsstufen abschalten\n");
+        "Usage:\n"
+        "  gpk c [options] <build-dir> <archive.gpk>\n"
+        "  gpk x [-t N] <archive.gpk> <target-dir>\n"
+        "  gpk l <archive.gpk>\n"
+        "Options for packing:\n"
+        "  -l N         level 1..9 (default 9)\n"
+        "  -t N         threads (default 4)\n"
+        "  -b MiB       block size (default 64)\n"
+        "  --max-ram GB memory budget: threads and, if needed, block size are chosen to fit\n"
+        "  --xz         xz/LZMA2 instead of LZRC as the core (comparison)\n"
+        "  --no-cm      text core (context mixing) off: faster unpacking, larger text\n"
+        "  --no-filter --no-sort --no-dedup --no-raw   disable individual stages\n"
+        "  --no-preproc disable all preprocessing stages\n");
     exit(2);
 }
 
@@ -924,10 +923,10 @@ int main(int argc, char **argv) {
         if (!strcmp(s, "-l") && i + 1 < argc) g_level = atoi(argv[++i]);
         else if (!strcmp(s, "-t") && i + 1 < argc) g_threads = atoi(argv[++i]);
         else if (!strcmp(s, "-b") && i + 1 < argc) g_block = (u64)atoi(argv[++i]) << 20;
-        else if (!strcmp(s, "--max-ram") && i + 1 < argc) { opt_max_ram_gb = atof(argv[++i]); if (opt_max_ram_gb <= 0) die("%s", "--max-ram braucht einen Wert > 0 (GB)"); }
+        else if (!strcmp(s, "--max-ram") && i + 1 < argc) { opt_max_ram_gb = atof(argv[++i]); if (opt_max_ram_gb <= 0) die("%s", "--max-ram needs a value > 0 (GB)"); }
         else if (!strcmp(s, "--xz")) {
 #ifdef GPK_NO_XZ
-            die("%s", "--xz ist in diesem Build nicht verfügbar (ohne liblzma gebaut)");
+            die("%s", "--xz is not available in this build (built without liblzma)");
 #else
             opt_codec = CODEC_XZ;
 #endif
@@ -941,7 +940,7 @@ int main(int argc, char **argv) {
         else if (np < 2) pos[np++] = s;
         else usage();
     }
-    if (g_block < (1u << 20) || g_block > (1ull << 30)) die("%s", "Blockgröße muss 1..1024 MiB sein");
+    if (g_block < (1u << 20) || g_block > (1ull << 30)) die("%s", "block size must be 1..1024 MiB");
     if (g_threads < 1) g_threads = 1;
     if (g_threads > 64) g_threads = 64;
     if (!strcmp(cmd, "c") && np == 2) return cmd_compress(pos[0], pos[1]);

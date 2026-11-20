@@ -1,4 +1,4 @@
-/* PXC-Fuzztest: Roundtrip für 1-4 Kanäle, Rauschen und Flächen, beschädigte Ströme (ASan/UBSan). */
+/* PXC fuzz test: round trip for 1-4 channels, noise and flat areas, corrupted streams (ASan/UBSan). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +12,7 @@ int main(void) {
         for (size_t i = 0; i < n; i++)
             px[i] = it % 3 == 0 ? (unsigned char)rand() : it % 3 == 1 ? (unsigned char)((i / ch) % w * 3 + rand() % 5) : (unsigned char)((i / 37) & 1 ? 255 : 0);
         size_t cn = 0; unsigned char *c = pxc_encode(px, w, h, ch, &cn);
-        if (!c || !pxc_decode(c, cn, out, w, h, ch) || memcmp(px, out, n)) { printf("Roundtrip-Fehler %d (%ux%u, %d Kanäle)\n", it, w, h, ch); bad++; }
+        if (!c || !pxc_decode(c, cn, out, w, h, ch) || memcmp(px, out, n)) { printf("roundtrip error %d (%ux%u, %d channels)\n", it, w, h, ch); bad++; }
         for (int k = 0; c && k < 6; k++) {
             unsigned char *m = malloc(cn); memcpy(m, c, cn);
             m[rand() % cn] ^= (unsigned char)(1 + rand() % 255);
@@ -21,6 +21,6 @@ int main(void) {
         }
         free(px); free(out); free(c);
     }
-    printf("PXC-Fuzztest: %s\n", bad ? "FEHLER" : "OK");
+    printf("PXC fuzz test: %s\n", bad ? "ERROR" : "OK");
     return bad != 0;
 }

@@ -1,4 +1,4 @@
-/* Filter-Labor: filter_lab <datei> -> Größe nach LZRC für viele Filtervarianten */
+/* Filter lab: filter_lab <file> -> size after LZRC for many filter variants */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +11,7 @@ static void run(const char *name, fspec f) {
     size_t cs = lzrc_compress(F, N, Z, lzrc_bound(N), &p);
     memcpy(T, F, N); filter_decode(&f, T, D, N, 0);
     int ok = !memcmp(A, D, N);
-    printf("  %-34s %9zu  %s\n", name, cs, ok ? "" : "ROUNDTRIP-FEHLER");
+    printf("  %-34s %9zu  %s\n", name, cs, ok ? "" : "ROUNDTRIP ERROR");
     if (cs < best) { best = cs; snprintf(bestname, sizeof bestname, "%s", name); }
 }
 int main(int argc, char **argv) {
@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     A = malloc(N); F = malloc(N); D = malloc(N); T = malloc(N); Z = malloc(lzrc_bound(N));
     if (fread(A, 1, N, fp) != N) return 1;
     int S = argc > 2 ? atoi(argv[2]) : 4;
-    printf("%s (%zu Bytes), Datensatz %d\n", argv[1], N, S);
+    printf("%s (%zu bytes), record %d\n", argv[1], N, S);
     fspec f; char nm[64];
     memset(&f, 0, sizeof f); run("none", f);
     memset(&f, 0, sizeof f); f.id = FT_DELTA; f.stride = S; run("byte-delta(S)", f);
@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
     for (int W = 2; W <= 4; W += 2) for (int o = 1; o <= 2; o++) for (int pl = 0; pl <= 1; pl++) {
         if (S % W) continue;
         memset(&f, 0, sizeof f); f.id = FT_WPRED; f.stride = S; f.fields[0] = W; f.fields[1] = o; f.fields[2] = pl;
-        snprintf(nm, sizeof nm, "wpred W=%d ord=%d planes=%s", W, o, pl ? "satz" : "wort"); run(nm, f);
+        snprintf(nm, sizeof nm, "wpred W=%d ord=%d planes=%s", W, o, pl ? "record" : "word"); run(nm, f);
     }
     printf("  -> bester: %s\n", bestname);
 }

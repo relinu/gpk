@@ -7,12 +7,12 @@ all: gpk zstdtool
 gpk: gpk.c platform.h lzrc.c lzrc.h tcm.c tcm.h filters.c filters.h pngx.c pngx.h pxc.c pxc.h jpgx.c jpgx.h ../glz.c ../glz.h
 	$(CC) $(CFLAGS) -o $@ gpk.c lzrc.c tcm.c filters.c pngx.c pxc.c jpgx.c ../glz.c -lz -llzma -lpthread -lm
 
-# Vergleichswerkzeug: zstd mit Long-Range-Modus (nur Laufzeitbibliothek vorhanden)
+# Comparison tool: zstd with long-range mode (only the runtime library is available)
 zstdtool: zstdtool.c
 	$(CC) $(CFLAGS) -o $@ zstdtool.c $(LIBDIR)/libzstd.so.1
 
-# Windows-.exe per Cross-Compiling (MinGW-w64), statisch gelinkt: keine DLLs nötig.
-# Ohne liblzma: Option --xz ist in der .exe nicht verfügbar (Standard-Kern LZRC schon).
+# Windows .exe via cross-compiling (MinGW-w64), statically linked: no DLLs needed.
+# Without liblzma: option --xz is not available in the .exe (the default core LZRC is).
 WIN_CC     ?= x86_64-w64-mingw32-gcc
 WIN_CFLAGS ?= -O2 -Wall -Wextra
 

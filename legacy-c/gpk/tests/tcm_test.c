@@ -1,4 +1,4 @@
-/* TCM-Test: tcm_test <datei>... -> Größe, Tempo, Roundtrip */
+/* TCM test: tcm_test <file>... -> size, speed, round trip */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
         if (fread(s, 1, n, f) != n) return 1; fclose(f);
         double t0 = now(); size_t cs = tcm_compress(s, n, c, tcm_bound(n)); double tc = now() - t0;
         t0 = now(); int ok = tcm_decompress(c, cs, d, n) && !memcmp(s, d, n); double td = now() - t0;
-        printf("%-40s %10zu -> %9zu (%.3f bpc)  pack %.1f MB/s  entpack %.1f MB/s  %s\n", strrchr(argv[a], '/') ? strrchr(argv[a], '/') + 1 : argv[a],
-               n, cs, 8.0 * cs / n, n / tc / 1e6, n / td / 1e6, ok ? "OK" : "FEHLER");
+        printf("%-40s %10zu -> %9zu (%.3f bpc)  pack %.1f MB/s  unpack %.1f MB/s  %s\n", strrchr(argv[a], '/') ? strrchr(argv[a], '/') + 1 : argv[a],
+               n, cs, 8.0 * cs / n, n / tc / 1e6, n / td / 1e6, ok ? "OK" : "ERROR");
     }
 }

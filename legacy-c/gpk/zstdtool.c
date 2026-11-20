@@ -1,4 +1,4 @@
-/* zstdtool c <level> <ein> <aus> | zstdtool d <ein> <aus>  – zstd mit 128-MiB-Fenster (--long=27) */
+/* zstdtool c <level> <in> <out> | zstdtool d <in> <out>  – zstd with a 128 MiB window (--long=27) */
 #include <stdio.h>
 #include <stdlib.h>
 typedef struct ZSTD_CCtx_s ZSTD_CCtx; typedef struct ZSTD_DCtx_s ZSTD_DCtx;

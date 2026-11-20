@@ -1,24 +1,24 @@
-/* PXC – siehe pxc.h. Nur Ganzzahl-Arithmetik: Encoder und Decoder müssen auf
- * allen Plattformen bitgleich rechnen. */
+/* PXC – see pxc.h. Integer arithmetic only: encoder and decoder must compute
+ * bit-identically on all platforms. */
 #include "pxc.h"
 #include <stdlib.h>
 #include <string.h>
 
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef int32_t i32; typedef int64_t i64; typedef uint64_t u64;
 
-#define NACT   10                 /* Klassen der Gradienten-Aktivität */
-#define NERR   7                  /* Klassen der Nachbar-Fehlerenergie */
+#define NACT   10                 /* classes of gradient activity */
+#define NERR   7                  /* classes of neighbor error energy */
 #define NCTX   (NACT * NERR)
-#define NPRED  6                  /* MED, Gradient, West, Nord, Mittel(W,N), Mittel(W,N,NW,NE) */
-#define MAXE   11                 /* Exponent der Restgröße */
+#define NPRED  6                  /* MED, gradient, west, north, mean(W,N), mean(W,N,NW,NE) */
+#define MAXE   11                 /* exponent of the residual magnitude */
 
-/* ---------------- binärer Arithmetik-Coder ---------------- */
+/* ---------------- binary arithmetic coder ---------------- */
 typedef struct { u32 x1, x2, x; u8 *out; size_t n, cap; const u8 *in; size_t ip, inn; int err; } AC;
 static void ac_put(AC *a, u8 b) {
     if (a->n == a->cap) { a->cap = a->cap * 2 + 4096; u8 *p = realloc(a->out, a->cap); if (!p) { a->err = 1; return; } a->out = p; }
     a->out[a->n++] = b;
 }
-/* Wahrscheinlichkeit aus zwei Zählern mit schneller und langsamer Lernrate */
+/* probability from two counters with a fast and a slow learning rate */
 typedef struct { u16 f, s; } Prob;
 static inline u32 pr12(const Prob *p) { u32 v = ((u32)p->f + p->s) >> 5; return v < 1 ? 1 : (v > 4095 ? 4095 : v); }
 static inline void pupd(Prob *p, int bit) {
@@ -43,10 +43,10 @@ static inline int dec_bit(AC *a, Prob *p) {
     return bit;
 }
 
-/* ---------------- Modell ---------------- */
+/* ---------------- Model ---------------- */
 typedef struct {
     Prob zero[4][NCTX], sign[4][NCTX], expo[4][NCTX][MAXE + 1], mant[4][NERR][MAXE + 1][2];
-    i32 bsum[4][NCTX], bcnt[4][NCTX];                    /* Bias-Korrektur je Kontext */
+    i32 bsum[4][NCTX], bcnt[4][NCTX];                    /* bias correction per context */
 } Model;
 static void model_init(Model *m) {
     Prob *p = (Prob *)m;
@@ -55,11 +55,11 @@ static void model_init(Model *m) {
     memset(m->bsum, 0, sizeof m->bsum); memset(m->bcnt, 0, sizeof m->bcnt);
 }
 
-/* Zeilenpuffer je Kanal: Werte (int16-Ebene), Fehler je Prädiktor, Restbeträge */
+/* row buffers per channel: values (int16 plane), error per predictor, residual magnitudes */
 typedef struct {
-    int16_t *pl;                /* ganze Ebene */
-    u16 *pe[NPRED][2];          /* |Fehler| je Prädiktor: Zeile darüber / aktuelle Zeile */
-    u16 *re[2];                 /* |Rest| (nach Bias): Zeile darüber / aktuelle Zeile */
+    int16_t *pl;                /* whole plane */
+    u16 *pe[NPRED][2];          /* |error| per predictor: row above / current row */
+    u16 *re[2];                 /* |residual| (after bias): row above / current row */
 } Chan;
 
 static inline int iabs(int v) { return v < 0 ? -v : v; }
@@ -75,7 +75,7 @@ static inline int med(int W, int N, int NW) {
 }
 
 typedef struct { int pred, ctx, eq, p[NPRED]; } Ctx;
-/* Kontext und Vorhersage für Pixel (x,y) eines Kanals – identisch in Encoder und Decoder */
+/* context and prediction for pixel (x,y) of a channel – identical in encoder and decoder */
 static inline void context(const Model *m, const Chan *c, u32 w, u32 x, u32 y, int k, int r0mag, Ctx *o) {
     const int16_t *row = c->pl + (size_t)y * w, *up = y ? row - w : NULL;
     int W = x ? row[x - 1] : (y ? up[x] : 0);
@@ -87,9 +87,9 @@ static inline void context(const Model *m, const Chan *c, u32 w, u32 x, u32 y, i
     int g = W + N - NW, mx = W > N ? W : N, mn = W < N ? W : N;
     o->p[1] = g < mn ? mn : (g > mx ? mx : g);
     o->p[2] = W; o->p[3] = N;
-    o->p[4] = (W + N + 1) >> 1;                       /* Mittelwerte dämpfen Rauschen */
+    o->p[4] = (W + N + 1) >> 1;                       /* means dampen noise */
     o->p[5] = (W + N + NW + NE + 2) >> 2;
-    /* Gewichtete Mischung: Gewicht ~ 1 / (lokaler Fehler des Prädiktors)^2 */
+    /* weighted mix: weight ~ 1 / (local error of the predictor)^2 */
     i64 num = 0, den = 0;
     for (int i = 0; i < NPRED; i++) {
         u32 e = 1;
@@ -99,9 +99,9 @@ static inline void context(const Model *m, const Chan *c, u32 w, u32 x, u32 y, i
         num += wt * o->p[i]; den += wt;
     }
     int blend = (int)((num + den / 2) / den);
-    /* Fehlerenergie der Nachbarn und Gradienten-Aktivität -> Kodierkontext */
+    /* error energy of the neighbors and gradient activity -> coding context */
     int en = (x ? c->re[1][x - 1] : 0) + (y ? c->re[0][x] : 0) + ((y && x) ? c->re[0][x - 1] >> 1 : 0) + ((y && x + 1 < w) ? c->re[0][x + 1] >> 1 : 0);
-    if (k > 0) en += r0mag >> 1;                                 /* Rest des Grün-Kanals am selben Pixel */
+    if (k > 0) en += r0mag >> 1;                                 /* residual of the green channel at the same pixel */
     int act = iabs(NE - N) + iabs(N - NW) + iabs(NW - W) + (iabs(W - WW) >> 1);
     o->eq = qclass(en, TERR, NERR);
     o->ctx = qclass(act, TACT, NACT) * NERR + o->eq;
@@ -112,7 +112,7 @@ static inline void learn(Model *m, Chan *c, u32 x, int k, const Ctx *o, int v) {
     for (int i = 0; i < NPRED; i++) { int e = iabs(v - o->p[i]); c->pe[i][1][x] = (u16)(e > 65535 ? 65535 : e); }
     int r = v - o->pred; c->re[1][x] = (u16)iabs(r);
     i32 *bs = &m->bsum[k][o->ctx], *bc = &m->bcnt[k][o->ctx];
-    *bs += r + (*bc ? *bs / *bc : 0);                          /* Fehler vor Bias-Korrektur */
+    *bs += r + (*bc ? *bs / *bc : 0);                          /* error before bias correction */
     (*bc)++;
     if (*bc >= 32) { *bs /= 2; *bc /= 2; }
 }
@@ -164,14 +164,14 @@ static uint8_t *encode_ct(const uint8_t *px, uint32_t w, uint32_t h, int ch, int
     Chan c[4]; memset(c, 0, sizeof c);
     Model *m = malloc(sizeof(Model));
     if (!m || !chans_alloc(c, ch, w, h)) { chans_free(c); free(m); return NULL; }
-    for (size_t i = 0; i < np; i++) {                 /* Farbtransformation: G, R-G, B-G, A */
+    for (size_t i = 0; i < np; i++) {                 /* color transform: G, R-G, B-G, A */
         const u8 *p = px + i * ch;
         if (ct && ch >= 3) { c[0].pl[i] = p[1]; c[1].pl[i] = (int16_t)(p[0] - p[1]); c[2].pl[i] = (int16_t)(p[2] - p[1]); if (ch == 4) c[3].pl[i] = p[3]; }
         else for (int k = 0; k < ch; k++) c[k].pl[i] = p[k];
     }
     model_init(m);
     AC a = {0}; a.x2 = 0xFFFFFFFFu;
-    ac_put(&a, (u8)ct);                                /* erstes Byte: Farbtransformation */
+    ac_put(&a, (u8)ct);                                /* first byte: color transform */
     for (u32 y = 0; y < h; y++) {
         for (u32 x = 0; x < w; x++) {
             int r0 = 0;
@@ -192,7 +192,7 @@ static uint8_t *encode_ct(const uint8_t *px, uint32_t w, uint32_t h, int ch, int
     return a.out;
 }
 
-/* Beide Varianten (mit/ohne Farbtransformation) probieren, kleinere nehmen */
+/* try both variants (with/without color transform), take the smaller one */
 uint8_t *pxc_encode(const uint8_t *px, uint32_t w, uint32_t h, int ch, size_t *outn) {
     size_t n0 = 0, n1 = 0;
     uint8_t *a = encode_ct(px, w, h, ch, 0, &n0);
@@ -220,7 +220,7 @@ int pxc_decode(const uint8_t *src, size_t n, uint8_t *px, uint32_t w, uint32_t h
             for (int k = 0; k < ch; k++) {
                 Ctx o; context(m, &c[k], w, x, y, k, ct ? r0 : 0, &o);
                 int r = decode_res(&a, m, k, &o), v = o.pred + r;
-                if (v < (ct && k > 0 && k < 3 ? -255 : 0) || v > 255) goto done;   /* korrupte Daten */
+                if (v < (ct && k > 0 && k < 3 ? -255 : 0) || v > 255) goto done;   /* corrupt data */
                 c[k].pl[(size_t)y * w + x] = (int16_t)v;
                 learn(m, &c[k], x, k, &o, v);
                 if (k == 0) r0 = iabs(r);
@@ -228,7 +228,7 @@ int pxc_decode(const uint8_t *src, size_t n, uint8_t *px, uint32_t w, uint32_t h
         }
         for (int k = 0; k < ch; k++) next_row(&c[k]);
     }
-    for (size_t i = 0; i < np; i++) {                 /* Farbtransformation rückgängig */
+    for (size_t i = 0; i < np; i++) {                 /* undo the color transform */
         u8 *p = px + i * ch;
         if (ct) { int g = c[0].pl[i]; p[1] = (u8)g; p[0] = (u8)(c[1].pl[i] + g); p[2] = (u8)(c[2].pl[i] + g); if (ch == 4) p[3] = (u8)c[3].pl[i]; }
         else for (int k = 0; k < ch; k++) p[k] = (u8)c[k].pl[i];

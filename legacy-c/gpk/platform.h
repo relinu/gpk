@@ -1,4 +1,4 @@
-/* Plattformschicht: Linux/POSIX und Windows (MinGW-w64). */
+/* Platform layer: Linux/POSIX and Windows (MinGW-w64). */
 #ifndef GPK_PLATFORM_H
 #define GPK_PLATFORM_H
 #include <stdio.h>
@@ -16,7 +16,7 @@
 #include <direct.h>
 #include <sys/utime.h>
 #ifndef S_ISLNK
-#define S_ISLNK(m) 0                      /* Windows: Symlinks werden beim Scannen wie Dateien behandelt */
+#define S_ISLNK(m) 0                      /* Windows: symlinks are treated like files when scanning */
 #endif
 #define lstat stat
 
@@ -33,7 +33,7 @@ static inline int plat_open_write(const char *p, int create) {
 }
 static inline int plat_close(int fd) { return _close(fd); }
 static inline int plat_set_size(int fd, uint64_t n) { return _chsize_s(fd, (long long)n) ? -1 : 0; }
-/* Jeder Worker öffnet eigene Handles, daher ist Seek + Write hier sicher. */
+/* Every worker opens its own handles, so seek + write is safe here. */
 static inline int plat_write_at(int fd, const void *buf, uint64_t len, uint64_t off) {
     if (_lseeki64(fd, (long long)off, SEEK_SET) < 0) return -1;
     const uint8_t *p = buf;
@@ -45,7 +45,7 @@ static inline int plat_write_at(int fd, const void *buf, uint64_t len, uint64_t 
     }
     return 0;
 }
-/* Liest genau len Bytes ab off; jeder Aufrufer nutzt ein eigenes Handle. */
+/* Reads exactly len bytes from off; every caller uses its own handle. */
 static inline int plat_read_at(int fd, void *buf, uint64_t len, uint64_t off) {
     if (_lseeki64(fd, (long long)off, SEEK_SET) < 0) return -1;
     uint8_t *p = buf;
@@ -63,13 +63,13 @@ static inline int plat_symlink(const char *target, const char *p) { (void)target
 static inline int plat_readlink(const char *p, char *buf, size_t n) { (void)p; (void)buf; (void)n; return -1; }
 static inline void plat_unlink(const char *p) { _unlink(p); }
 static inline void plat_init_console(void) { SetConsoleOutputCP(CP_UTF8); }
-/* Windows kennt keine Unix-Rechte: portable Standardwerte ins Archiv schreiben
- * (Ordner 0755, Dateien 0644, schreibgeschützte Dateien 0444). */
+/* Windows has no Unix permissions: write portable defaults into the archive
+ * (directories 0755, files 0644, read-only files 0444). */
 static inline uint32_t plat_portable_mode(unsigned st_mode, int is_dir) {
     if (is_dir) return 0755;
     return (st_mode & _S_IWRITE) ? 0644 : 0444;
 }
-/* Windows: Pfade mit Backslash oder Laufwerksangabe könnten aus dem Zielordner ausbrechen. */
+/* Windows: paths with a backslash or a drive letter could escape the target directory. */
 static inline int plat_path_char_ok(char c) { return c != '\\' && c != ':'; }
 #else
 #include <unistd.h>
@@ -113,7 +113,7 @@ static inline uint32_t plat_portable_mode(unsigned st_mode, int is_dir) { (void)
 static inline int plat_path_char_ok(char c) { (void)c; return 1; }
 #endif
 
-/* Datei schreibgeschützt in den Speicher einblenden (size > 0). */
+/* Map a file read-only into memory (size > 0). */
 static inline const uint8_t *plat_map(const char *path, uint64_t size) {
     if (!size) return NULL;
 #ifdef _WIN32
@@ -123,7 +123,7 @@ static inline const uint8_t *plat_map(const char *path, uint64_t size) {
     CloseHandle(f);
     if (!m) return NULL;
     void *p = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
-    CloseHandle(m);                       /* die Ansicht hält das Mapping am Leben */
+    CloseHandle(m);                       /* the view keeps the mapping alive */
     return p;
 #else
     int fd = open(path, O_RDONLY);

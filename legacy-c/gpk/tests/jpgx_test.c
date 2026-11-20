@@ -1,4 +1,4 @@
-/* JPEG-Rekompression testen: Größe, Vergleich mit LZRC, bitgenauer Roundtrip */
+/* Test JPEG recompression: size, comparison with LZRC, bit-exact round trip */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,12 +11,12 @@ int main(int argc, char **argv) {
         unsigned char *d = malloc(n), *o = malloc(n), *z = malloc(lzrc_bound(n)); if (fread(d, 1, n, f) != n) return 1; fclose(f);
         lzrc_params p; lzrc_default_params(&p, 6); size_t lz = lzrc_compress(d, n, z, lzrc_bound(n), &p);
         size_t tn = 0; unsigned char *t = jpgx_forward(d, n, &tn);
-        const char *st = "nicht unterstützt";
-        if (t) { int ok = jpgx_inverse(t, tn, o, n) && !memcmp(o, d, n); st = ok ? "OK" : "FEHLER"; if (ok) nok++; else nbad++; } else nno++;
+        const char *st = "unsupported";
+        if (t) { int ok = jpgx_inverse(t, tn, o, n) && !memcmp(o, d, n); st = ok ? "OK" : "ERROR"; if (ok) nok++; else nbad++; } else nno++;
         to += n; tl += lz < n ? lz : n; tj += t ? tn : (lz < n ? lz : n);
         printf("%-58s %9zu | LZRC %9zu | JPGX %9zu (%+5.1f %%) %s\n", strrchr(argv[a], '/') ? strrchr(argv[a], '/') + 1 : argv[a], n, lz, t ? tn : 0, t ? 100.0 * ((double)tn / n - 1) : 0.0, st);
         free(d); free(o); free(z); free(t);
     }
-    printf("SUMME: %d OK, %d nicht unterstützt, %d FEHLER | Original %zu | LZRC %zu | mit JPGX %zu (%+.1f %% ggü. Original)\n", nok, nno, nbad, to, tl, tj, 100.0 * ((double)tj / to - 1));
+    printf("TOTAL: %d OK, %d unsupported, %d ERRORS | original %zu | LZRC %zu | with JPGX %zu (%+.1f %% vs. original)\n", nok, nno, nbad, to, tl, tj, 100.0 * ((double)tj / to - 1));
     return nbad != 0;
 }

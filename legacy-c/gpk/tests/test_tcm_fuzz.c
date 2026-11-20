@@ -1,9 +1,9 @@
-/* TCM-Fuzztest: Roundtrip auf Text/Binärdaten und beschädigte Ströme (mit ASan/UBSan bauen). */
+/* TCM fuzz test: round trip on text/binary data and corrupted streams (build with ASan/UBSan). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../tcm.h"
-static const char TXT[] = "der Drache und das Schwert\n  {\"key\": 42}\n";
+static const char TXT[] = "the dragon and the sword\n  {\"key\": 42}\n";
 int main(void) {
     srand(7);
     int bad = 0;
@@ -13,8 +13,8 @@ int main(void) {
         for (size_t i = 0; i < n; i++)
             s[i] = it % 2 ? (unsigned char)rand() : (unsigned char)TXT[(i * 7 + i / 13) % strlen(TXT)];
         size_t cs = tcm_compress(s, n, c, tcm_bound(n));
-        if (!cs || !tcm_decompress(c, cs, d, n) || memcmp(s, d, n)) { printf("Roundtrip-Fehler %d\n", it); bad++; }
-        for (int k = 0; k < 4; k++) {                      /* verfälschen / abschneiden: darf nicht abstürzen */
+        if (!cs || !tcm_decompress(c, cs, d, n) || memcmp(s, d, n)) { printf("roundtrip error %d\n", it); bad++; }
+        for (int k = 0; k < 4; k++) {                      /* corrupt / truncate: must not crash */
             unsigned char *m = malloc(cs); memcpy(m, c, cs);
             m[rand() % cs] ^= (unsigned char)(1 + rand() % 255);
             tcm_decompress(m, k == 3 ? cs / 2 : cs, d, n);
@@ -22,6 +22,6 @@ int main(void) {
         }
         free(s); free(c); free(d);
     }
-    printf("TCM-Fuzztest: %s\n", bad ? "FEHLER" : "OK");
+    printf("TCM fuzz test: %s\n", bad ? "ERROR" : "OK");
     return bad != 0;
 }
