@@ -51,11 +51,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-              target
-              target-xz
-            # Per-commit key, restored from the most recent cache: build outputs stay current
-            key: linux-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-            restore-keys: linux-${{ hashFiles('Cargo.lock') }}-
+            target
+            target-xz
+          # Per-commit key, restored from the most recent cache: build outputs stay current
+          key: linux-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: linux-${{ hashFiles('Cargo.lock') }}-
 
       - name: Formatting
         run: cargo fmt --check
