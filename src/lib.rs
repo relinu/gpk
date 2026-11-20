@@ -14,6 +14,9 @@
 pub mod filters;
 pub mod glz;
 pub mod lzrc;
+pub mod tcm;
+pub mod pxc;
+pub mod pngx;
 pub mod zlib;
 
 #[cfg(feature = "cref")]

@@ -122,3 +122,92 @@ fn lzrc_identisch_zu_c() {
         assert_eq!(back2, d);
     }
 }
+
+#[test]
+fn tcm_identisch_zu_c() {
+    let mut r = Rng::new(13);
+    let text = std::fs::read_to_string("legacy-c/gpk/gpk.c").unwrap();
+    for case in 0..8 {
+        let d: Vec<u8> = match case {
+            0 => Vec::new(),
+            1 => b"x".to_vec(),
+            2 => text.as_bytes().to_vec(),
+            3 => r.bytes(20_000),
+            4 => test_data(&mut r, 50_000),
+            _ => mixed_data(&mut r, 120_000 * case),
+        };
+        let n = d.len();
+        let rust = gpk::tcm::compress(&d);
+        let cap = unsafe { tcm_bound(n) };
+        let mut c = vec![0u8; cap];
+        let cn = unsafe { tcm_compress(d.as_ptr(), n, c.as_mut_ptr(), cap) };
+        c.truncate(cn);
+        assert!(rust == c, "TCM weicht ab: Fall {case}, n={n} ({} vs {} Bytes)", rust.len(), c.len());
+        let mut back = vec![0u8; n];
+        gpk::tcm::decompress(&c, &mut back);
+        assert_eq!(back, d);
+    }
+}
+
+#[test]
+fn pxc_identisch_zu_c() {
+    let mut r = Rng::new(17);
+    for it in 0..40 {
+        let (w, h, ch) = (1 + r.next() % 120, 1 + r.next() % 80, 1 + (it % 4) as usize);
+        let n = (w * h) as usize * ch;
+        let px: Vec<u8> = (0..n)
+            .map(|i| match it % 4 {
+                0 => r.next() as u8,
+                1 => ((i / ch) as u32 % w * 3 + r.next() % 7) as u8,
+                2 => if (i / 41) & 1 == 1 { 250 } else { 3 },
+                _ => ((i % 7) * 30 + (r.next() % 3) as usize) as u8,
+            })
+            .collect();
+        let rust = gpk::pxc::encode(&px, w, h, ch).unwrap();
+        let mut cn = 0usize;
+        let c = take(unsafe { pxc_encode(px.as_ptr(), w, h, ch as i32, &mut cn) }, cn).unwrap();
+        assert!(rust == c, "PXC weicht ab: {it} ({w}x{h}x{ch})");
+        let mut out = vec![0u8; n];
+        assert!(gpk::pxc::decode(&c, &mut out, w, h, ch));
+        assert_eq!(out, px);
+    }
+}
+
+/// Echte PNGs: aus dem Test-Build (falls vorhanden) und aus dem System
+fn real_pngs() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    for dir in ["/home/user/gamecomp/gpk/testbuild/MyGame/MyGame_Data/UI", "/usr/share/icons/hicolor/48x48/apps", "/usr/share/icons/hicolor/256x256/apps", "/usr/share/pixmaps"] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut f: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+            f.sort();
+            v.extend(f.into_iter().take(15));
+        }
+    }
+    v
+}
+
+#[test]
+fn pngx_identisch_zu_c() {
+    let files = real_pngs();
+    let (mut tested, mut converted) = (0, 0);
+    for f in &files {
+        let png = std::fs::read(f).unwrap();
+        for mode in [1u32, 2] {
+            let rust = gpk::pngx::forward(&png, mode);
+            let mut tn = 0usize;
+            let c = take(unsafe { pngx_forward_mode(png.as_ptr(), png.len(), mode as i32, &mut tn) }, tn);
+            assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {} Modus {mode}", f.display());
+            if let (Some(rv), Some(cv)) = (&rust, &c) {
+                assert!(rv == cv, "PNGX weicht ab: {} Modus {mode}", f.display());
+                let mut out = vec![0u8; png.len()];
+                assert!(gpk::pngx::inverse(cv, &mut out));
+                assert_eq!(out, png);
+                converted += 1;
+            }
+            tested += 1;
+        }
+        assert_eq!(gpk::pngx::channels(&png), unsafe { pngx_channels(png.as_ptr(), png.len()) } as usize);
+    }
+    eprintln!("PNG: {tested} Prüfungen, {converted} umgewandelt");
+    assert!(converted > 0 || files.is_empty());
+}
