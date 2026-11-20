@@ -37,17 +37,25 @@ jobs:
           cargo --version
 
       - name: Dependencies (C reference, test images)
+        timeout-minutes: 5
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends zlib1g-dev liblzma-dev python3-pil
+          # zlib/liblzma headers are usually preinstalled on the runner: only call apt if missing
+          if ! dpkg -s zlib1g-dev liblzma-dev >/dev/null 2>&1; then
+            sudo apt-get -o Acquire::Retries=3 update
+            sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends zlib1g-dev liblzma-dev
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
 
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: linux-${{ hashFiles('Cargo.lock') }}
+              target
+              target-xz
+            # Per-commit key, restored from the most recent cache: build outputs stay current
+            key: linux-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+            restore-keys: linux-${{ hashFiles('Cargo.lock') }}-
 
       - name: Formatting
         run: cargo fmt --check
@@ -137,7 +145,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-${{ hashFiles('Cargo.lock') }}
+          key: windows-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: windows-${{ hashFiles('Cargo.lock') }}-
 
       - name: Build gpk.exe (static, no DLL dependencies except Windows system libraries)
         run: |
