@@ -19,3 +19,4 @@ testbuild/
 *.log
 .wine/
 __pycache__/
+/target-xz/

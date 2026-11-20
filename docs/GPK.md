@@ -47,7 +47,10 @@ machen das Packen langsamer bzw. das Archiv etwas größer.
 2. **Deduplizieren**: identische Dateien nur einmal (CRC32 + Größe + Bytevergleich)
 3. **Umwandeln** (immer vor der Übernahme vollständig rekonstruiert und verglichen):
    - **PNG**: IDAT-Deflate-Strom entpacken, wenn zlib ihn bitgenau reproduzieren kann
-     (Precomp/Preflate-Prinzip). Danach je Bild das Kleinere von zwei Varianten:
+     (Precomp/Preflate-Prinzip). Entpacken und Nachkomprimieren macht eine eigene
+     Implementierung (`src/inflate.rs`, `src/deflate.rs`), die bitgenau wie zlib 1.4 arbeitet;
+     die Suche über Stufe, memLevel und Strategie vergleicht laufend und bricht beim ersten
+     abweichenden Block ab (das zlib-Kopfbyte verrät zudem die Stufenklasse). Danach je Bild das Kleinere von zwei Varianten:
      Rohdaten für LZRC oder **Pixel-Coder PXC** (Zeilenfilter entfernen, gewichtete
      Mischung von 6 Prädiktoren, optionale Farbtransformation, Kontext-Arithmetikkodierung)
    - **JPEG** (`src/jpgx.rs`): Baseline/Extended mit Huffman, 1–4 Komponenten, beliebige
@@ -66,7 +69,7 @@ machen das Packen langsamer bzw. das Archiv etwas größer.
 5. **Sortieren** nach Klasse, Endung und Name (ähnliche Dateien landen im selben Fenster)
 6. **Komprimieren** in unabhängigen 64-MiB-Blöcken, parallel, mit **LZRC**
    (LZ77 + Binärbaum-Match-Finder + optimales Parsing + adaptiver Range Coder,
-   LZMA-Prinzip, eigene Implementierung) – wahlweise `--xz` als Kern.
+   LZMA-Prinzip, eigene Implementierung) – wahlweise `--xz` als Kern (nur mit `--features xz`).
    **Textblöcke** (4 MiB, reiner Text) werden mit dem Context-Mixing-Kern
    **TCM** kodiert (Ordnungen 0–6, Wort-, Spalten- und Match-Modell, zwei Mischnetze,
    zwei APM-Stufen); LZRC wird dort nur noch zusätzlich probiert, wenn eine schnelle

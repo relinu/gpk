@@ -1,8 +1,8 @@
-//! Schmale Hülle um die echte zlib (C, statisch gebaut über `libz-sys`).
+//! Schmale Hülle um die echte zlib (C, statisch gebaut über `libz-sys`) – nur als Referenz für Tests.
 //!
-//! Wird nur für die PNG-Rekompression gebraucht: Ein von zlib erzeugter
-//! Deflate-Strom lässt sich nur mit zlib selbst bitgenau neu erzeugen.
-//! Das ist die einzige Stelle mit `unsafe` im Projekt (FFI).
+//! Das Programm selbst nutzt die eigene, bitgleiche Implementierung (`deflate`, `inflate`);
+//! die Differenztests vergleichen beide.
+//! Nur mit Feature `cref` übersetzt (FFI, `unsafe`).
 
 use libz_sys as z;
 use std::ptr::null_mut;

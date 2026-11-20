@@ -45,18 +45,35 @@ target/release/gpk x -t 4 spiel.gpk entpackt
 target/release/gpk l spiel.gpk
 ```
 
-Benötigt: Rust (stable) und einen C-Compiler (für die statisch eingebundenen zlib und liblzma).
+Benötigt: nur Rust (stable). Der Standard-Build enthält keinen C-Code; einzige Abhängigkeit ist
+`crc32fast` (reines Rust). Optional `--features xz` für den Vergleichskern `--xz` (liblzma, braucht
+einen C-Compiler).
 Optionen: `gpk` ohne Argumente zeigt die Hilfe; `--max-ram GB` begrenzt den Speicherbedarf.
 
 ## Sicherheit
 
-- Der gesamte Code ist sicheres Rust; die einzige `unsafe`-Stelle ist die Anbindung an zlib
-  (`src/zlib.rs`), die für die bitgenaue PNG-Rekompression exakt dieselbe zlib wie beim Packen braucht.
+- Der gesamte Code ist sicheres Rust: `unsafe` ist in der Bibliothek per `#![forbid(unsafe_code)]`
+  verboten (Ausnahme nur das Test-Feature `cref`, das die C-Referenz und die echte zlib zum
+  Vergleich einbindet). Die PNG-Rekompression nutzt eine eigene Deflate-Implementierung, die
+  bitgenau dieselben Ströme wie zlib 1.4 erzeugt (siehe unten).
 - Archive werden vor dem Entpacken vollständig geprüft: Pfade (keine absoluten Pfade, kein `..`,
   unter Windows kein `\` oder `:`), Größen und Grenzen aller Blöcke und Stücke. Beschädigte Daten
   führen zu einer Fehlermeldung, nie zu einem Absturz oder Schreiben außerhalb des Zielordners;
   jede Datei wird per CRC32 geprüft.
 - Absolute Symlinks werden beim Entpacken übersprungen.
+
+## Eigene Algorithmen statt Bibliotheken
+
+| Bibliothek | ersetzt durch | Ergebnis |
+|---|---|---|
+| zlib (C) für die PNG-Rekompression | `src/deflate.rs`, `src/inflate.rs`: Deflate bitgenau wie zlib 1.4 (Stufen 1–9, memLevel 1–9, Strategien default/filtered), eigener Inflater | gleich schnell wie zlib (Deflate 97–103 %, Inflate 90–106 %); die Parametersuche vergleicht laufend und bricht beim ersten abweichenden Block ab: **PNG-Suche 1,9–3,9× schneller**; Windows-.exe 18 % kleiner |
+| liblzma (C) für `--xz` | LZRC (eigener Kern, gab es schon) | nur noch optional (`--features xz`), LZRC packt kleiner und schneller |
+| crc32fast (Rust) | – | bleibt: nutzt die CPU-Befehle für Carry-less-Multiplikation, 12 GB/s gegenüber 2 GB/s der besten sicheren Eigenimplementierung (Slicing-by-16) |
+
+Bitgenauigkeit wird in der CI gegen die echte zlib geprüft: 702 Parameter-Kombinationen auf
+Text, Zufall, Bild-, Null- und Strukturdaten (inkl. Fensterverschiebungen, gespeicherter Blöcke,
+weit entfernter Matches) sowie 8100 beschädigte Ströme, die der Inflater genau wie zlib
+annehmen bzw. ablehnen muss. Die Archive sind bytegleich zum Stand mit zlib.
 
 ## Tests
 
@@ -83,7 +100,7 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
 ```
 
 Gegenüber der C-Version hat die Rust-`.exe` denselben Funktionsumfang wie unter Linux
-(auch `--xz`) und unterstützt Unicode-Dateinamen. Archive sind zwischen Linux und Windows
+und unterstützt Unicode-Dateinamen. Archive sind zwischen Linux und Windows
 austauschbar; unter Windows werden Symlinks übersprungen und Unix-Rechte nicht gesetzt.
 
 ## CI
@@ -91,7 +108,8 @@ austauschbar; unter Windows werden Symlinks übersprungen und Unix-Rechte nicht 
 `.github/workflows/build.yml` läuft bei jedem Push auf `main` und `rust-port` und bei Pull Requests,
 ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
 
-- **Linux:** `cargo fmt`/`clippy`, Tests und Differenztests gegen die C-Referenz, Tests im
+- **Linux:** `cargo fmt`/`clippy`, Tests und Differenztests gegen die C-Referenz und die echte
+  zlib, Prüfung „kein C-Code im Standard-Build“, optionaler xz-Kern, Tests im
   Debug-Modus (Überlaufprüfungen), Rauchtest (packen, entpacken, bitgenau vergleichen,
   beschädigtes Archiv muss abgelehnt werden), gleiche Archive bei 1 und 4 Threads,
   Kreuz-Entpacken C ↔ Rust

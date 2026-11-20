@@ -256,3 +256,133 @@ fn jpgx_identisch_zu_c() {
     }
     eprintln!("JPEG: {ok} bytegleich umgewandelt, {rejected} von beiden abgelehnt");
 }
+
+/// Testdaten für Deflate: Text, Zufall, Nullen, Bildzeilen, weite Wiederholungen (> 32 KiB),
+/// kurze Matches in großer Entfernung (TOO_FAR), Mischungen über mehrere Fensterverschiebungen.
+#[allow(clippy::vec_init_then_push)]
+fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
+    let mut r = Rng::new(77);
+    let mut v: Vec<(String, Vec<u8>)> = Vec::new();
+    v.push(("leer".into(), Vec::new()));
+    v.push(("1 Byte".into(), b"x".to_vec()));
+    v.push(("text".into(), test_data(&mut r, 150_000)));
+    v.push(("zufall".into(), r.bytes(100_000)));
+    v.push(("nullen".into(), vec![0u8; 300_000]));
+    v.push(("gemischt".into(), mixed_data(&mut r, 400_000)));
+    // Bildartig: Zeilen mit Filterbyte, Verläufen und Rauschen
+    let mut img = Vec::new();
+    for y in 0..300u32 {
+        img.push((y % 5) as u8);
+        for x in 0..800u32 {
+            img.push(((x * 3 + y * 7) & 0xFF) as u8 ^ (r.next() % 4) as u8);
+        }
+    }
+    v.push(("bild".into(), img));
+    // Wiederholung eines Blocks in > 32 KiB Abstand und kurze Matches weit weg
+    let block = r.bytes(40_000);
+    let mut far = block.clone();
+    far.extend(r.bytes(5_000));
+    far.extend_from_slice(&block);
+    for i in 0..20_000u32 {
+        far.extend_from_slice(&[(i % 7) as u8, b'a' + (i % 3) as u8, b'z']);
+        far.extend(r.bytes(2));
+    }
+    v.push(("weit".into(), far));
+    // Viele kurze Wiederholungen mit Abständen um 4096 (TOO_FAR-Grenze)
+    let mut tf = r.bytes(5000);
+    for i in 0..60_000usize {
+        let c = tf[i + 905];
+        tf.push(if i % 3 == 0 { c } else { r.next() as u8 });
+    }
+    v.push(("toofar".into(), tf));
+    v
+}
+
+#[test]
+fn deflate_bitgenau_wie_zlib() {
+    let corpus = deflate_corpus();
+    let mut n = 0;
+    for (name, d) in &corpus {
+        // kleine/mittlere Daten: alle Parameter; große: Auswahl
+        let mems: &[i32] = if d.len() > 200_000 { &[1, 8, 9] } else { &[1, 2, 5, 8, 9] };
+        for &strat in &[0, 1] {
+            for &mem in mems {
+                for lvl in 1..=9 {
+                    let z = gpk::zlib::deflate_with(d, lvl, mem, strat).unwrap();
+                    let o = gpk::deflate::deflate_with(d, lvl, mem, strat).unwrap();
+                    assert!(o == z, "{name}: Stufe {lvl}, memLevel {mem}, Strategie {strat}: {} vs {} B", o.len(), z.len());
+                    assert!(gpk::deflate::matches(d, lvl, mem, strat, &z));
+                    n += 1;
+                }
+            }
+        }
+    }
+    eprintln!("Deflate: {n} Kombinationen bytegleich zu zlib");
+}
+
+#[test]
+fn deflate_grosse_daten_wie_zlib() {
+    // mehrere MB: viele Fensterverschiebungen und Blöcke
+    let mut r = Rng::new(78);
+    let d = mixed_data(&mut r, 3_000_000);
+    for (lvl, mem, strat) in [(1, 8, 0), (3, 9, 0), (5, 8, 1), (6, 8, 0), (9, 9, 0), (9, 8, 1)] {
+        let z = gpk::zlib::deflate_with(&d, lvl, mem, strat).unwrap();
+        assert!(gpk::deflate::deflate_with(&d, lvl, mem, strat).unwrap() == z, "Stufe {lvl} memLevel {mem} Strategie {strat}");
+    }
+}
+
+#[test]
+fn matches_bricht_bei_abweichung_ab() {
+    let mut r = Rng::new(79);
+    let d = test_data(&mut r, 200_000);
+    let z = gpk::zlib::deflate_with(&d, 6, 8, 0).unwrap();
+    assert!(gpk::deflate::matches(&d, 6, 8, 0, &z));
+    for (lvl, mem, strat) in [(5, 8, 0), (6, 9, 0), (6, 8, 1), (9, 8, 0)] {
+        let other = gpk::zlib::deflate_with(&d, lvl, mem, strat).unwrap();
+        assert_eq!(gpk::deflate::matches(&d, lvl, mem, strat, &z), other == z);
+    }
+}
+
+#[test]
+fn inflate_wie_zlib() {
+    let mut r = Rng::new(80);
+    let mut streams = Vec::new();
+    for (_, d) in deflate_corpus() {
+        for (lvl, mem, strat) in [(1, 8, 0), (6, 8, 0), (9, 9, 1)] {
+            streams.push(gpk::zlib::deflate_with(&d, lvl, mem, strat).unwrap());
+        }
+    }
+    let mut agree = 0;
+    for z in &streams {
+        assert_eq!(gpk::inflate::inflate_zlib(z, 1 << 24), gpk::zlib::inflate_all(z, 1 << 24));
+        // Beschädigungen: gleiche Annahme/Ablehnung und gleiches Ergebnis wie zlib
+        for _ in 0..300 {
+            let mut m = z.clone();
+            match r.next() % 4 {
+                0 => {
+                    let i = r.next() as usize % m.len();
+                    m[i] ^= 1 << (r.next() % 8);
+                }
+                1 => {
+                    let i = r.next() as usize % m.len();
+                    m[i] = r.next() as u8;
+                }
+                2 => m.truncate(r.next() as usize % m.len()),
+                _ => {
+                    let i = r.next() as usize % m.len();
+                    m.insert(i, r.next() as u8);
+                }
+            }
+            let mine = gpk::inflate::inflate_zlib(&m, 1 << 24);
+            let theirs = gpk::zlib::inflate_all(&m, 1 << 24);
+            assert!(
+                mine == theirs,
+                "Abweichung bei beschädigtem Strom: eigen {:?} B, zlib {:?} B",
+                mine.map(|v| v.len()),
+                theirs.map(|v| v.len())
+            );
+            agree += 1;
+        }
+    }
+    eprintln!("Inflate: {agree} beschädigte Ströme gleich behandelt wie zlib");
+}

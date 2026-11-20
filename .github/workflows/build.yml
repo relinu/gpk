@@ -45,7 +45,9 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --features cref
+        run: |
+          cargo clippy --all-targets
+          cargo clippy --all-targets --features cref,xz
 
       - name: Testbilder erzeugen
         run: python3 tools/gen_testimages.py testbilder/png testbilder/jpg
@@ -54,13 +56,16 @@ jobs:
         env:
           GPK_PNG_DIR: ${{ github.workspace }}/testbilder/png
           GPK_JPEG_DIR: ${{ github.workspace }}/testbilder/jpg
-        run: cargo test --release --features cref
+        run: cargo test --release --features cref,xz
 
       - name: Tests im Debug-Modus (Überlaufprüfungen aktiv)
         run: cargo test --lib
 
       - name: gpk bauen
-        run: cargo build --release
+        run: |
+          cargo build --release
+          # Standard-Build: kein C-Code, einzige Abhängigkeit crc32fast (+ cfg-if)
+          test "$(cargo tree -e normal --prefix none | sort -u | cut -d' ' -f1 | tr '\n' ' ')" = "cfg-if crc32fast gpk "
 
       - name: GPK-Rauchtest (packen, entpacken, bitgenau vergleichen)
         run: python3 ci/smoke_test.py target/release/gpk
@@ -77,6 +82,14 @@ jobs:
           target/release/gpk x c.gpk aus-rust && diff -r baum aus-rust
           legacy-c/gpk/gpk x rust.gpk aus-c && diff -r baum aus-c
           legacy-c/gpk/gpk x rust4.gpk aus-c4 && diff -r baum aus-c4
+
+      - name: Optionaler xz-Kern (--features xz)
+        run: |
+          cargo build --release --features xz --target-dir target-xz
+          target-xz/release/gpk c --xz -t 2 baum xz.gpk
+          target-xz/release/gpk x xz.gpk aus-xz && diff -r baum aus-xz
+          if target/release/gpk x xz.gpk aus-ohne 2>fehler.txt; then exit 1; fi
+          grep -q "ohne xz gebaut" fehler.txt
 
       - name: Linux-Programm hochladen
         uses: actions/upload-artifact@v4

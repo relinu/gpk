@@ -1332,6 +1332,9 @@ fn crc32_combine(a: u32, b: u32, len_b: u64) -> u32 {
 pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
     let t0 = Instant::now();
     let a = load_archive(archive)?;
+    if !cfg!(feature = "xz") && a.blocks.iter().any(|b| b.codec == CODEC_XZ) {
+        return err("Archiv wurde mit --xz gepackt; dieses Programm ist ohne xz gebaut (cargo build --release --features xz)");
+    }
     fs::create_dir_all(outdir).map_err(|e| io_err("Kann Ordner nicht anlegen", outdir, e))?;
     let mut targets: Vec<Vec<usize>> = vec![Vec::new(); a.contents.len()];
     for (i, e) in a.entries.iter().enumerate() {

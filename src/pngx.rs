@@ -7,7 +7,7 @@
 //!
 //! Jede Umwandlung wird vor der Rückgabe vollständig rekonstruiert und geprüft.
 
-use crate::{pxc, zlib};
+use crate::{deflate, inflate, pxc};
 
 const MAX_RAW: usize = 512 << 20;
 const SIG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
@@ -114,9 +114,27 @@ pub fn channels(png: &[u8]) -> usize {
     png_geom(png).map_or(0, |g| g.2)
 }
 
-/// Original aus Skelett + Rohdaten + zlib-Parametern zusammensetzen.
-fn assemble(skel: &[u8], raw: &[u8], lvl: i32, mem: i32, strat: i32, out: &mut [u8]) -> bool {
-    let Some(zs) = zlib::deflate_with(raw, lvl, mem, strat) else { return false };
+/// Bei der Selbstprüfung bekannt: Rohdaten und der dazu bereits bestätigte Deflate-Strom.
+type Known<'a> = Option<(&'a [u8], &'a [u8])>;
+
+/// Original aus Skelett + Rohdaten + zlib-Parametern zusammensetzen. Mit `known` (Selbstprüfung
+/// beim Packen) müssen die rekonstruierten Rohdaten den Originalrohdaten gleichen; dann wird der
+/// schon Byte für Byte bestätigte Strom verwendet, statt ein zweites Mal zu komprimieren.
+fn assemble(skel: &[u8], raw: &[u8], lvl: i32, mem: i32, strat: i32, out: &mut [u8], known: Known) -> bool {
+    let fresh;
+    let zs: &[u8] = match known {
+        Some((kraw, kzs)) => {
+            if raw != kraw {
+                return false;
+            }
+            kzs
+        }
+        None => {
+            let Some(z) = deflate::deflate_with(raw, lvl, mem, strat) else { return false };
+            fresh = z;
+            &fresh
+        }
+    };
     let (sk, origsize) = (skel.len(), out.len());
     if sk < 8 || origsize < 8 {
         return false;
@@ -182,15 +200,15 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
     if !ok || p != n || zs.is_empty() {
         return None;
     }
-    let raw = zlib::inflate_all(&zs, MAX_RAW)?;
+    let raw = inflate::inflate_zlib(&zs, MAX_RAW)?;
     // Parameter suchen, mit denen zlib den Strom bitgenau erzeugt
     const LV: [i32; 9] = [9, 6, 8, 7, 5, 4, 3, 2, 1];
     for strat in [0, 1] {
         // Z_DEFAULT_STRATEGY, Z_FILTERED
         for mem in [8, 9] {
             for lvl in LV {
-                let Some(d) = zlib::deflate_with(&raw, lvl, mem, strat) else { continue };
-                if d != zs {
+                // Vergleich läuft mit und bricht beim ersten abweichenden Block ab
+                if !deflate::matches(&raw, lvl, mem, strat, &zs) {
                     continue;
                 }
                 let mut t = Vec::new();
@@ -215,9 +233,10 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
                     t.extend_from_slice(&(raw.len() as u32).to_le_bytes());
                     t.extend_from_slice(&raw);
                 }
-                // Sicherheitsnetz: Rekonstruktion vorab prüfen
+                // Sicherheitsnetz: Rekonstruktion vorab prüfen (der Deflate-Strom ist durch
+                // `matches` schon bestätigt; geprüft werden Rohdaten, Pixel-Coder und Aufbau)
                 let mut chk = vec![0u8; n];
-                return (inverse(&t, &mut chk) && chk == png).then_some(t);
+                return (inverse_impl(&t, &mut chk, Some((&raw, &zs))) && chk == png).then_some(t);
             }
         }
     }
@@ -226,6 +245,10 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
 
 /// Rekonstruiert das Original (`out.len()` = Originalgröße). `false` bei ungültigen Daten.
 pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
+    inverse_impl(t, out, None)
+}
+
+fn inverse_impl(t: &[u8], out: &mut [u8], known: Known) -> bool {
     let tn = t.len();
     if tn < 16 {
         return false;
@@ -248,7 +271,7 @@ pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
         if rn != tn - 16 - sk {
             return false;
         }
-        return assemble(skel, &t[16 + sk..], lvl, mem, strat, out);
+        return assemble(skel, &t[16 + sk..], lvl, mem, strat, out, known);
     }
     let q = &t[12 + sk..];
     if q.len() < 16 {
@@ -275,7 +298,7 @@ pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
         return false;
     }
     let raw = png_refilter(&px, filt, w as usize, hh, ch);
-    assemble(skel, &raw, lvl, mem, strat, out)
+    assemble(skel, &raw, lvl, mem, strat, out, known)
 }
 
 #[cfg(test)]
@@ -306,7 +329,7 @@ pub(crate) mod tests {
         ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
         let mut png = SIG.to_vec();
         png.extend(chunk(b"IHDR", &ihdr));
-        png.extend(chunk(b"IDAT", &zlib::deflate_with(&raw, lvl, 8, 0).unwrap()));
+        png.extend(chunk(b"IDAT", &deflate::deflate_with(&raw, lvl, 8, 0).unwrap()));
         png.extend(chunk(b"IEND", &[]));
         png
     }
