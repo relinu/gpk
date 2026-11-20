@@ -2,7 +2,6 @@
 #include "tcm.h"
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #ifdef _WIN32
 #include <malloc.h>
 #define tcm_aligned_alloc(al, n) _aligned_malloc((n), (al))
@@ -30,20 +29,21 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef int32_t 
 
 /* ---------------- Logistik-Hilfen ---------------- */
 static int16_t STRETCH[4096];
-static int SQUASH_T[4096];
 static int tables_ready;
-static int squash(int d) {                 /* d in 1/256 Logit -> p in 0..4095 */
-    if (d > 2047) d = 2047;
-    if (d < -2047) d = -2047;
-    return SQUASH_T[d + 2048];
+/* squash(d) = 4096 / (1 + e^(-d/256)), nur mit Ganzzahlen (Stützstellen + Interpolation):
+ * Encoder und Decoder müssen auf jeder Plattform bitgleich rechnen – Gleitkomma
+ * aus unterschiedlichen Mathe-Bibliotheken (glibc, msvcrt) wäre dafür nicht sicher. */
+static int squash(int d) {
+    static const int T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
+                              2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
+    if (d > 2047) return 4095;
+    if (d < -2047) return 1;
+    int w = d & 127; d = (d >> 7) + 16;
+    int v = (T[d] * (128 - w) + T[d + 1] * w + 64) >> 7;
+    return v < 1 ? 1 : (v > 4095 ? 4095 : v);
 }
 static void init_tables(void) {
     if (tables_ready) return;
-    for (int i = 0; i < 4096; i++) {
-        double x = (i - 2048) / 256.0;
-        int v = (int)(4096.0 / (1.0 + exp(-x)));
-        SQUASH_T[i] = v > 4095 ? 4095 : (v < 1 ? 1 : v);
-    }
     int pi = 0;
     for (int x = -2047; x <= 2047; x++) {          /* Umkehrfunktion von squash */
         int v = squash(x);
@@ -114,7 +114,7 @@ static inline u32 hash2(u32 a, u32 b) { u32 h = a * 0x9E3779B1u ^ b * 0x85EBCA77
 static int model_init(Model *m, const u8 *buf) {
     memset(m, 0, sizeof *m);
     init_tables();
-    for (int i = 0; i < 1024; i++) DT[i] = (int)(65536.0 * 2 / (2 * i + 3));
+    for (int i = 0; i < 1024; i++) DT[i] = (65536 * 2) / (2 * i + 3);   /* ganzzahlig: plattformunabhängig */
     for (int k = 0; k < NHASH; k++) {
         m->ht[k] = tcm_aligned_alloc(64, sizeof(u32) << HBITS);
         if (!m->ht[k]) return 0;

@@ -282,21 +282,43 @@ static void add_cand(fspec *cand, int *nc, fspec f) {
 }
 
 /* PNG-Rekompression versuchen; nur übernehmen, wenn sie nach LZRC wirklich kleiner ist. */
+/* Geschätzte Größe nach LZRC; für entpackte PNG-Rohdaten mit den Filtern, die die
+ * Klassifizierung später auch probieren würde (fairer Vergleich mit dem Pixel-Coder). */
+static size_t lz_estimate(const u8 *d, size_t n, int bpp) {
+    lzrc_params p; lzrc_default_params(&p, 2);
+    u8 *out = xmalloc(lzrc_bound(n)), *tmp = xmalloc(n);
+    size_t best = lzrc_compress(d, n, out, lzrc_bound(n), &p);
+    if (!best) best = n;
+    for (int k = 0; bpp > 1 && k < 2; k++) {
+        fspec f; memset(&f, 0, sizeof f);
+        f.id = k ? FT_SHUFDELTA : FT_DELTA; f.stride = (u8)bpp;
+        filter_encode(&f, d, tmp, n, 0);
+        size_t z = lzrc_compress(tmp, n, out, lzrc_bound(n), &p);
+        if (z && z < best) best = z;
+    }
+    free(out); free(tmp);
+    return best;
+}
+
+/* PNG-Rekompression: Variante 1 (entpackte Rohdaten, später LZRC) und Variante 2
+ * (Pixel-Coder) probieren; die kleinere wird übernommen, wenn sie das Original schlägt. */
 static void xform_one(u32 ci, void *ctx) {
     (void)ctx;
     Content *c = &C[ci];
     if (c->size < 64) return;
     View v = view_original(c);
     if (v.p[0] != 0x89 || memcmp(v.p + 1, "PNG", 3)) { view_close(&v); return; }
-    size_t tn; u8 *t = pngx_forward(v.p, c->size, &tn);
+    int bpp = pngx_channels(v.p, c->size);
+    size_t t1n = 0, t2n = 0;
+    u8 *t1 = pngx_forward_mode(v.p, c->size, 1, &t1n);
+    u8 *t2 = t1 ? pngx_forward_mode(v.p, c->size, 2, &t2n) : NULL;
     view_close(&v);
-    if (!t) return;
-    if (tn > g_block) { free(t); return; }
-    lzrc_params p; lzrc_default_params(&p, 2);
-    u8 *out = xmalloc(lzrc_bound(tn));
-    size_t z = lzrc_compress(t, tn, out, lzrc_bound(tn), &p);
-    free(out);
-    if (!z || z > c->size * 0.97) { free(t); return; }
+    size_t z1 = t1 && t1n <= g_block ? lz_estimate(t1, t1n, bpp) : (size_t)-1;
+    size_t z2 = t2 && t2n <= g_block ? t2n : (size_t)-1;   /* bereits entropiekodiert */
+    u8 *t = z2 < z1 ? t2 : t1;
+    size_t tn = z2 < z1 ? t2n : t1n, z = z2 < z1 ? z2 : z1;
+    if (t == t1) free(t2); else free(t1);
+    if (!t || z == (size_t)-1 || z > c->size * 0.97) { free(t); return; }
     c->spill_off = spill_write(t, tn);                 /* auslagern statt im RAM halten */
     c->xform = XF_PNG; c->ssize = tn;
     free(t);
