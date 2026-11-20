@@ -301,23 +301,35 @@ fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn deflate_bit_exact_like_zlib() {
     let corpus = deflate_corpus();
-    let mut n = 0;
-    for (name, d) in &corpus {
+    // All combinations as independent jobs, distributed over all cores (the longest test otherwise)
+    let mut jobs = Vec::new();
+    for (ci, (_, d)) in corpus.iter().enumerate() {
         // small/medium data: all parameters; large data: a selection
         let mems: &[i32] = if d.len() > 200_000 { &[1, 8, 9] } else { &[1, 2, 5, 8, 9] };
         for &strat in &[0, 1] {
             for &mem in mems {
                 for lvl in 1..=9 {
-                    let z = gpk::zlib::deflate_with(d, lvl, mem, strat).unwrap();
-                    let o = gpk::deflate::deflate_with(d, lvl, mem, strat).unwrap();
-                    assert!(o == z, "{name}: level {lvl}, memLevel {mem}, strategy {strat}: {} vs {} B", o.len(), z.len());
-                    assert!(gpk::deflate::matches(d, lvl, mem, strat, &z));
-                    n += 1;
+                    jobs.push((ci, lvl, mem, strat));
                 }
             }
         }
     }
-    eprintln!("Deflate: {n} combinations byte-identical to zlib");
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(ci, lvl, mem, strat)) = jobs.get(i) else { break };
+                let (name, d) = &corpus[ci];
+                let z = gpk::zlib::deflate_with(d, lvl, mem, strat).unwrap();
+                let o = gpk::deflate::deflate_with(d, lvl, mem, strat).unwrap();
+                assert!(o == z, "{name}: level {lvl}, memLevel {mem}, strategy {strat}: {} vs {} B", o.len(), z.len());
+                assert!(gpk::deflate::matches(d, lvl, mem, strat, &z));
+            });
+        }
+    });
+    eprintln!("Deflate: {} combinations byte-identical to zlib", jobs.len());
 }
 
 #[test]

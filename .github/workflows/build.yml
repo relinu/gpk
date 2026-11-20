@@ -4,10 +4,17 @@ on:
   push:
     branches: [main, rust-port]
     tags: ['v*']          # push tag v1.2.3 -> release with programs
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']   # documentation-only changes need no build
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   release:
     types: [published]    # release published in the GitHub UI -> attach programs
   workflow_dispatch:
+
+# A new push to the same branch cancels the run that is still in progress
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +26,7 @@ jobs:
   linux:
     name: Linux (Rust)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -30,8 +38,8 @@ jobs:
 
       - name: Dependencies (C reference, test images)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zlib1g-dev liblzma-dev python3-pil
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends zlib1g-dev liblzma-dev python3-pil
 
       - uses: actions/cache@v4
         with:
@@ -101,6 +109,7 @@ jobs:
     # No Windows VM: cross-compiling with MinGW-w64 and testing with Wine on Ubuntu
     name: Windows-.exe (Cross-Build + Wine)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       WINEDEBUG: -all
       WINEPREFIX: ${{ github.workspace }}/.wine
@@ -115,9 +124,12 @@ jobs:
           rustup default $RUST
 
       - name: Install dependencies
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 wine wine64
+          # Without recommended packages (fonts, multimedia, 32-bit parts): far fewer downloads.
+          # A hanging mirror aborts after 5 minutes instead of blocking the job for hours.
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gcc-mingw-w64-x86-64 wine wine64
 
       - uses: actions/cache@v4
         with:
