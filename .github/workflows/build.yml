@@ -72,7 +72,7 @@ jobs:
         env:
           GPK_PNG_DIR: ${{ github.workspace }}/testimages/png
           GPK_JPEG_DIR: ${{ github.workspace }}/testimages/jpg
-        run: cargo test --release --features cref,xz
+        run: cargo test --profile ci --features cref,xz
 
       - name: Tests in debug mode (overflow checks enabled)
         run: cargo test --lib
