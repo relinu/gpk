@@ -1,6 +1,6 @@
-//! LZRC – Hauptkern: LZ77 mit Binärbaum-Match-Finder, preisbasiertem optimalem
-//! Parsing und adaptivem binärem Range Coder (LZMA-Prinzip).
-//! Port von `legacy-c/gpk/lzrc.c`, formatgleich und mit bytegleicher Ausgabe.
+//! LZRC – main core: LZ77 with a binary-tree match finder, price-based optimal
+//! parsing and an adaptive binary range coder (LZMA principle).
+//! Port of `legacy-c/gpk/lzrc.c`, same format and byte-identical output.
 
 const NSTATES: usize = 12;
 const MINLEN: u32 = 2;
@@ -42,7 +42,7 @@ fn next_shortrep(s: u32) -> u32 {
     }
 }
 
-/// Parameter: Literal-Kontextbits, Literal-Positionsbits, Positionsbits, Suchtiefe, "nice"-Länge.
+/// Parameters: literal context bits, literal position bits, position bits, search depth, "nice" length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Params {
     pub lc: u32,
@@ -69,7 +69,7 @@ pub fn bound(n: usize) -> usize {
 }
 
 // ------------------------------------------------------------------
-// Modell
+// Model
 // ------------------------------------------------------------------
 #[derive(Clone)]
 struct LenModel {
@@ -208,7 +208,7 @@ impl Rce {
             m = (m << 1) | b as usize;
         }
     }
-    /// Umgekehrter Baum; Zähler für Knoten m liegen bei `probs[base + m - 1]`.
+    /// Reverse tree; the counters for node m live at `probs[base + m - 1]`.
     fn rtree(&mut self, probs: &mut [u16], base: usize, nb: u32, mut sym: u32) {
         let mut m = 1usize;
         for _ in 0..nb {
@@ -352,7 +352,7 @@ impl<'a> Rcd<'a> {
         let mut direct = 0u32;
         for _ in 0..fb - 4 {
             self.range >>= 1;
-            let t = self.code.wrapping_sub(self.range) >> 31; // 1 wenn code < range
+            let t = self.code.wrapping_sub(self.range) >> 31; // 1 if code < range
             self.code = self.code.wrapping_sub(self.range & t.wrapping_sub(1));
             direct = (direct << 1) | (1 - t);
             if self.range < (1 << 24) {
@@ -364,7 +364,7 @@ impl<'a> Rcd<'a> {
     }
 }
 
-/// Dekomprimiert genau `out.len()` Bytes. `None` bei beschädigten Daten.
+/// Decompresses exactly `out.len()` bytes. `None` on corrupted data.
 pub fn decompress(src: &[u8], out: &mut [u8]) -> Option<()> {
     if src.len() < 2 {
         return None;
@@ -425,7 +425,7 @@ pub fn decompress(src: &[u8], out: &mut [u8]) -> Option<()> {
         } else {
             if rc.bit(&mut m.g0[state as usize]) == 0 {
                 if rc.bit(&mut m.rep0_long[state as usize][ps]) == 0 {
-                    // Short-Rep: 1 Byte
+                    // Short rep: 1 byte
                     if r0 >= pos {
                         return None;
                     }
@@ -471,7 +471,7 @@ pub fn decompress(src: &[u8], out: &mut [u8]) -> Option<()> {
 }
 
 // ------------------------------------------------------------------
-// Preise (1/16 Bit) für den optimalen Parser – nur Encoder
+// Prices (1/16 bit) for the optimal parser – encoder only
 // ------------------------------------------------------------------
 fn price_table() -> [u32; 128] {
     let mut t = [0u32; 128];
@@ -570,7 +570,7 @@ impl Prices {
             for s in 0..64u32 {
                 let mut p = self.tree(&m.pos_slot[ls], 6, s);
                 if s >= END_POS_IDX {
-                    p += ((s >> 1) - 1 - 4) << 4; // direkte Bits
+                    p += ((s >> 1) - 1 - 4) << 4; // direct bits
                 }
                 self.slot[ls][s as usize] = p;
             }
@@ -597,7 +597,7 @@ impl Prices {
 }
 
 // ------------------------------------------------------------------
-// Encoder: Match-Finder + optimaler Parser
+// Encoder: match finder + optimal parser
 // ------------------------------------------------------------------
 #[derive(Clone, Copy, Default)]
 struct Node {
@@ -650,7 +650,7 @@ fn h4(d: &[u8], i: usize) -> usize {
 fn h3(d: &[u8], i: usize) -> usize {
     ((rd32(d, i) & 0xFF_FFFF).wrapping_mul(506_832_829) >> (32 - H3BITS)) as usize
 }
-/// Anzahl gleicher Bytes von d[a..] und d[b..], höchstens `limit`.
+/// Number of equal bytes of d[a..] and d[b..], at most `limit`.
 #[inline]
 fn match_len(d: &[u8], a: usize, b: usize, limit: u32) -> u32 {
     let limit = limit as usize;
@@ -670,14 +670,14 @@ fn match_len(d: &[u8], a: usize, b: usize, limit: u32) -> u32 {
 }
 
 impl<'a> Enc<'a> {
-    /// Binärbaum-Match-Finder: sucht Matches an pos und fügt pos in den Baum ein.
+    /// Binary-tree match finder: searches matches at pos and inserts pos into the tree.
     fn bt_find(&mut self, pos: u32, len_limit: u32, mut max_len: u32, mut cnt: usize, record: bool) -> usize {
         let buf = self.buf;
         let cur = pos as usize;
         let h = h4(buf, cur);
         let mut cur_match = self.head4[h];
         self.head4[h] = pos;
-        // ptr1/ptr0 als Indizes in son
+        // ptr1/ptr0 as indices into son
         let mut ptr1 = 2 * cur;
         let mut ptr0 = ptr1 + 1;
         let (mut len0, mut len1) = (0u32, 0u32);
@@ -735,7 +735,7 @@ impl<'a> Enc<'a> {
             self.ins += 1;
         }
     }
-    /// Matches mit streng steigender Länge (jeweils kürzeste Distanz).
+    /// Matches with strictly increasing length (shortest distance for each).
     fn get_matches(&mut self, pos: u32, avail: u32) -> usize {
         self.skip_to(pos);
         if pos + 4 > self.n {
@@ -759,7 +759,7 @@ impl<'a> Enc<'a> {
         let lim = self.bt_limit(pos);
         cnt = self.bt_find(pos, lim, best, cnt, true);
         self.ins = pos + 1;
-        // Match bis an die Grenze: über die "nice"-Länge hinaus verlängern
+        // Match reaches the limit: extend it beyond the "nice" length
         if cnt > 0 && self.mp[cnt - 1].len == lim && lim < avail {
             let mp = self.mp[cnt - 1];
             let a = cur + mp.len as usize;
@@ -875,7 +875,7 @@ impl<'a> Enc<'a> {
         self.state = next_rep(st as u32);
     }
 
-    /// Ein Fenster per DP optimal parsen und kodieren; liefert Anzahl verarbeiteter Bytes.
+    /// Parse one window optimally via DP and encode it; returns the number of bytes processed.
     fn parse_window(&mut self, rc: &mut Rce, pos: u32) -> u32 {
         let pbm = (1u32 << self.m.pb) - 1;
         let last = (self.n - pos).min(OPT_NUM);
@@ -913,13 +913,13 @@ impl<'a> Enc<'a> {
             let rep_p = match_p + self.pr.p1(self.m.is_rep[st]);
             let mut longest = 0u32;
 
-            // Short-Rep
+            // Short rep
             if nd.reps[0] < p && buf[cur] == buf[cur - nd.reps[0] as usize - 1] {
                 let pr = rep_p + self.pr.p0(self.m.g0[st]) + self.pr.p0(self.m.rep0_long[st][ps]);
                 Self::relax(&mut self.nodes, i + 1, pr, i, K_SHORTREP, 1, 0);
             }
 
-            // Repeat-Distanzen
+            // Repeat distances
             if avail >= MINLEN {
                 for r in 0..4u32 {
                     let d = nd.reps[r as usize];
@@ -948,7 +948,7 @@ impl<'a> Enc<'a> {
                 }
             }
 
-            // Neue Matches
+            // New matches
             let nm = self.get_matches(p, avail);
             if nm > 0 {
                 let norm_p = match_p + self.pr.p0(self.m.is_rep[st]);
@@ -975,13 +975,13 @@ impl<'a> Enc<'a> {
             }
 
             if longest >= self.nice {
-                end = i + longest; // langer Match: Fenster hier beenden
+                end = i + longest; // long match: end the window here
                 break;
             }
             i += 1;
         }
 
-        // Rückverfolgung, dann vorwärts kodieren
+        // Trace back, then encode forwards
         self.path.clear();
         let mut j = end;
         while j > 0 {
@@ -997,9 +997,9 @@ impl<'a> Enc<'a> {
     }
 }
 
-/// Komprimiert `src` vollständig (Kopf: lc|lp<<4, pb, dann Range-Coder-Daten).
+/// Compresses `src` completely (header: lc|lp<<4, pb, then range coder data).
 pub fn compress(src: &[u8], p: &Params) -> Vec<u8> {
-    assert!(src.len() <= 0xFFFF_FFF0, "Block zu groß");
+    assert!(src.len() <= 0xFFFF_FFF0, "block too large");
     let n = src.len() as u32;
     let mut out = Vec::with_capacity(src.len() / 3 + 64);
     out.push((p.lc | (p.lp << 4)) as u8);
@@ -1042,9 +1042,9 @@ pub fn compress(src: &[u8], p: &Params) -> Vec<u8> {
     rc.finish()
 }
 
-/// Schnelle Größenschätzung für die Filterwahl: dasselbe Modell und derselbe Range-Coder,
-/// aber gieriges Parsing (längster Match oder Wiederholung) statt optimaler DP.
-/// Erzeugt einen gültigen LZRC-Strom, ist aber etwa 5x schneller als Stufe 2.
+/// Fast size estimate for the filter choice: the same model and the same range coder,
+/// but greedy parsing (longest match or repeat) instead of the optimal DP.
+/// Produces a valid LZRC stream, but is about 5x faster than level 2.
 pub fn estimate(src: &[u8]) -> usize {
     let p = Params::level(1);
     let n = src.len() as u32;
@@ -1077,7 +1077,7 @@ pub fn estimate(src: &[u8]) -> usize {
     while pos < n {
         let cur = pos as usize;
         let avail = (n - pos).min(MAXLEN);
-        // Wiederholung der letzten Distanz?
+        // Repeat of the last distance?
         let d0 = e.reps[0];
         let rep_len = if avail >= MINLEN && d0 < pos { match_len(src, cur, cur - d0 as usize - 1, avail) } else { 0 };
         let nm = e.get_matches(pos, avail);
@@ -1101,17 +1101,17 @@ mod tests {
     use crate::testutil::Rng;
 
     #[test]
-    fn schaetzung_ist_gueltiger_strom() {
-        // estimate() kodiert echte LZRC-Daten; die Größe liegt nahe an Stufe 2
+    fn estimate_is_valid_stream() {
+        // estimate() encodes real LZRC data; the size is close to level 2
         let mut r = Rng::new(5);
         let d = sample(&mut r, 300_000);
         let est = estimate(&d);
         let real = compress(&d, &Params::level(2)).len();
-        assert!(est >= real * 9 / 10 && est <= real * 2, "Schätzung {est} vs. {real}");
+        assert!(est >= real * 9 / 10 && est <= real * 2, "estimate {est} vs. {real}");
     }
 
     fn sample(r: &mut Rng, n: usize) -> Vec<u8> {
-        let words: [&[u8]; 5] = [b"Drache ", b"Schwert ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\n    return x;"];
+        let words: [&[u8]; 5] = [b"dragon ", b"sword ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\n    return x;"];
         let mut v = Vec::with_capacity(n);
         while v.len() < n {
             if r.next() % 5 == 0 {
@@ -1137,11 +1137,11 @@ mod tests {
                 }
                 let c = compress(&d, &p);
                 let mut out = vec![0u8; n];
-                decompress(&c, &mut out).expect("dekodierbar");
+                decompress(&c, &mut out).expect("decodable");
                 assert_eq!(out, d);
             }
         }
-        // inkompressibel und lange Läufe
+        // incompressible data and long runs
         let rnd = r.bytes(100_000);
         let c = compress(&rnd, &Params::level(9));
         let mut out = vec![0u8; rnd.len()];

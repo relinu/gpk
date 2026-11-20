@@ -1,18 +1,18 @@
-//! Schmale Hülle um die echte zlib (C, statisch gebaut über `libz-sys`) – nur als Referenz für Tests.
+//! Thin wrapper around the real zlib (C, statically built via `libz-sys`) – only as a reference
+//! for tests.
 //!
-//! Das Programm selbst nutzt die eigene, bitgleiche Implementierung (`deflate`, `inflate`);
-//! die Differenztests vergleichen beide.
-//! Nur mit Feature `cref` übersetzt (FFI, `unsafe`).
+//! The program itself uses its own bit-identical implementation (`deflate`, `inflate`);
+//! the differential tests compare both. Only compiled with feature `cref` (FFI, `unsafe`).
 
 use libz_sys as z;
 use std::ptr::null_mut;
 
 unsafe extern "C" fn zalloc(_opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
-    // SAFETY: Standard-Allokator; zlib gibt den Speicher über zfree zurück.
+    // SAFETY: standard allocator; zlib returns the memory via zfree.
     unsafe { libc::calloc(items as usize, size as usize) }
 }
 unsafe extern "C" fn zfree(_opaque: z::voidpf, p: z::voidpf) {
-    // SAFETY: p stammt aus zalloc (calloc).
+    // SAFETY: p comes from zalloc (calloc).
     unsafe { libc::free(p) }
 }
 
@@ -37,13 +37,13 @@ fn new_stream() -> z::z_stream {
 
 const STREAM_SIZE: i32 = std::mem::size_of::<z::z_stream>() as i32;
 
-/// Deflate mit genau diesen zlib-Parametern (Fenster 15, zlib-Kopf).
+/// Deflate with exactly these zlib parameters (window bits 15, zlib header).
 pub fn deflate_with(raw: &[u8], level: i32, mem_level: i32, strategy: i32) -> Option<Vec<u8>> {
     if raw.len() > u32::MAX as usize / 2 {
         return None;
     }
     let mut s = new_stream();
-    // SAFETY: s ist vollständig initialisiert; zlib verwaltet seinen Zustand über state.
+    // SAFETY: s is fully initialized; zlib manages its state via `state`.
     unsafe {
         if z::deflateInit2_(&mut s, level, z::Z_DEFLATED, 15, mem_level, strategy, z::zlibVersion(), STREAM_SIZE) != z::Z_OK {
             return None;
@@ -65,8 +65,8 @@ pub fn deflate_with(raw: &[u8], level: i32, mem_level: i32, strategy: i32) -> Op
     }
 }
 
-/// Vollständig entpacken; `None`, wenn der Strom ungültig ist, nicht alle Eingabebytes
-/// verbraucht werden oder die Ausgabe `max_out` übersteigt.
+/// Inflate completely; `None` if the stream is invalid, not all input bytes are consumed,
+/// or the output exceeds `max_out`.
 pub fn inflate_all(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
     if zs.len() > u32::MAX as usize / 2 {
         return None;
@@ -74,7 +74,7 @@ pub fn inflate_all(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
     let mut s = new_stream();
     let mut cap = zs.len().saturating_mul(4).saturating_add(65536).min(max_out.max(1));
     let mut out = vec![0u8; cap];
-    // SAFETY: Zeiger zeigen in lebende Puffer; Längen passen zu avail_in/avail_out.
+    // SAFETY: pointers point into live buffers; lengths match avail_in/avail_out.
     unsafe {
         if z::inflateInit_(&mut s, z::zlibVersion(), STREAM_SIZE) != z::Z_OK {
             return None;

@@ -1,19 +1,18 @@
-//! Deflate (RFC 1951) mit zlib-Kopf, **bitgenau wie zlib 1.4** (`deflate.c`, `trees.c`).
+//! Deflate (RFC 1951) with zlib header, **bit-exact with zlib 1.4** (`deflate.c`, `trees.c`).
 //!
-//! Wird für die PNG-Rekompression gebraucht: Ein von zlib erzeugter Strom lässt sich nur mit
-//! exakt demselben Algorithmus bitgenau neu erzeugen. Abgedeckt sind die Parameter, die zlib-
-//! basierte PNG-Encoder verwenden: Stufen 1–9, memLevel 1–9, Fenster 32 KiB, Strategie
-//! „default“ (0) und „filtered“ (1).
+//! Needed for PNG recompression: a stream produced by zlib can only be recreated bit-exactly
+//! with exactly the same algorithm. Covered are the parameters that zlib-based PNG encoders
+//! use: levels 1–9, memLevel 1–9, window 32 KiB, strategy "default" (0) and "filtered" (1).
 //!
-//! Die Struktur folgt zlib bewusst eng (gleiche Namen, gleiche Reihenfolge der Operationen),
-//! einschließlich der Eigenheiten, die die Ausgabe beeinflussen:
-//! - `longest_match` vergleicht Byte 2 nicht (folgt aus gleichem Hash bei `hash_bits >= 8`),
-//! - Matches dürfen über das Datenende hinaus verglichen werden (Länge wird danach begrenzt);
-//!   deshalb wird auch der Fensterinhalt (Verschieben, Nullen hinter den Daten) exakt nachgebildet,
-//! - Häufigkeit/Code und Vater/Länge teilen sich in zlib je ein Feld (`union`); hier ebenso.
+//! The structure deliberately follows zlib closely (same names, same order of operations),
+//! including the quirks that affect the output:
+//! - `longest_match` does not compare byte 2 (implied by equal hashes when `hash_bits >= 8`),
+//! - matches may be compared beyond the end of the data (the length is clamped afterwards);
+//!   therefore the window contents (sliding, zeros behind the data) are reproduced exactly too,
+//! - in zlib, frequency/code and parent/length each share one field (`union`); same here.
 //!
-//! Mit [`matches`] wird die Ausgabe laufend mit einem erwarteten Strom verglichen und beim ersten
-//! abweichenden Block abgebrochen – das macht die Parametersuche für PNGs um ein Vielfaches schneller.
+//! With [`matches`] the output is compared continuously with an expected stream and aborted at
+//! the first differing block – this makes the parameter search for PNGs several times faster.
 
 use std::sync::OnceLock;
 
@@ -47,7 +46,7 @@ const EXTRA_DBITS: [i32; D_CODES] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6
 const EXTRA_BLBITS: [i32; BL_CODES] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
 const BL_ORDER: [usize; BL_CODES] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
-/// zlib-Konfiguration je Stufe: good, lazy, nice, chain; Stufen 1–3 nutzen `deflate_fast`.
+/// zlib configuration per level: good, lazy, nice, chain; levels 1–3 use `deflate_fast`.
 const CONFIG: [(usize, usize, usize, usize); 10] = [
     (0, 0, 0, 0),
     (4, 4, 8, 4),
@@ -61,7 +60,7 @@ const CONFIG: [(usize, usize, usize, usize); 10] = [
     (32, 258, 258, 4096),
 ];
 
-/// Baumeintrag wie zlibs `ct_data`: `fc` = Häufigkeit bzw. Code, `dl` = Vater bzw. Länge.
+/// Tree entry like zlib's `ct_data`: `fc` = frequency or code, `dl` = parent or length.
 #[derive(Clone, Copy, Default)]
 struct Ct {
     fc: u16,
@@ -177,7 +176,7 @@ fn d_code(t: &Tables, dist: usize) -> usize {
     }
 }
 
-/// Bitweiser Ausgabepuffer (LSB zuerst, wie zlib).
+/// Bitwise output buffer (LSB first, like zlib).
 struct BitOut {
     out: Vec<u8>,
     buf: u64,
@@ -198,7 +197,7 @@ impl BitOut {
     fn code(&mut self, c: usize, tree: &[Ct]) {
         self.send(tree[c].fc as u32, tree[c].dl as u32);
     }
-    /// Auf Bytegrenze auffüllen (zlib `bi_windup`).
+    /// Pad to a byte boundary (zlib `bi_windup`).
     fn windup(&mut self) {
         if self.valid > 0 {
             self.out.push(self.buf as u8);
@@ -208,7 +207,7 @@ impl BitOut {
     }
 }
 
-/// Gemeinsamer Zustand für den Baumaufbau (Heap, Tiefen, Bitlängen-Zähler, Längensummen).
+/// Shared state for building trees (heap, depths, bit length counts, length sums).
 struct Heap {
     heap: [usize; HEAP_SIZE],
     heap_len: usize,
@@ -241,7 +240,7 @@ fn pqdownheap(h: &mut Heap, tree: &[Ct], mut k: usize) {
     h.heap[k] = v;
 }
 
-/// Beschreibung eines Baums (zlib `static_tree_desc`).
+/// Description of a tree (zlib `static_tree_desc`).
 struct Desc<'a> {
     stree: Option<&'a [Ct]>,
     extra: &'a [i32],
@@ -313,7 +312,7 @@ fn gen_bitlen(h: &mut Heap, tree: &mut [Ct], max_code: usize, d: &Desc) {
     }
 }
 
-/// Huffman-Baum bauen (zlib `build_tree`); liefert `max_code`.
+/// Build a Huffman tree (zlib `build_tree`); returns `max_code`.
 fn build_tree(h: &mut Heap, tree: &mut [Ct], d: &Desc) -> usize {
     let mut max_code: isize = -1;
     h.heap_len = 0;
@@ -379,7 +378,7 @@ fn build_tree(h: &mut Heap, tree: &mut [Ct], d: &Desc) -> usize {
     max_code
 }
 
-/// Lauflängen der Codelängen zählen (zlib `scan_tree`).
+/// Count the run lengths of the code lengths (zlib `scan_tree`).
 fn scan_tree(tree: &mut [Ct], max_code: usize, bl_tree: &mut [Ct]) {
     let mut prevlen: i32 = -1;
     let mut nextlen = tree[0].dl as i32;
@@ -389,7 +388,7 @@ fn scan_tree(tree: &mut [Ct], max_code: usize, bl_tree: &mut [Ct]) {
         max_count = 138;
         min_count = 3;
     }
-    tree[max_code + 1].dl = 0xffff; // Wächter
+    tree[max_code + 1].dl = 0xffff; // guard
     for n in 0..=max_code {
         let curlen = nextlen;
         nextlen = tree[n + 1].dl as i32;
@@ -423,7 +422,7 @@ fn scan_tree(tree: &mut [Ct], max_code: usize, bl_tree: &mut [Ct]) {
     }
 }
 
-/// Codelängen eines Baums senden (zlib `send_tree`).
+/// Send the code lengths of a tree (zlib `send_tree`).
 fn send_tree(bw: &mut BitOut, tree: &[Ct], max_code: usize, bl_tree: &[Ct]) {
     let mut prevlen: i32 = -1;
     let mut nextlen = tree[0].dl as i32;
@@ -473,18 +472,18 @@ fn send_tree(bw: &mut BitOut, tree: &[Ct], max_code: usize, bl_tree: &[Ct]) {
     }
 }
 
-/// Kompressorzustand (entspricht zlibs `deflate_state` für einen einzigen `deflate(Z_FINISH)`-Aufruf).
+/// Compressor state (corresponds to zlib's `deflate_state` for a single `deflate(Z_FINISH)` call).
 struct State<'a> {
     t: &'static Tables,
     input: &'a [u8],
     in_pos: usize,
-    // Konfiguration
+    // Configuration
     good_match: usize,
     max_lazy: usize,
     nice_match: usize,
     max_chain: usize,
     filtered: bool,
-    // Fenster und Hash-Ketten
+    // Window and hash chains
     window: Box<[u8; WINDOW_SIZE]>,
     prev: Box<[u16; W_SIZE]>,
     head: Vec<u16>,
@@ -501,16 +500,16 @@ struct State<'a> {
     prev_match: usize,
     match_available: bool,
     insert: usize,
-    // Symbolpuffer (Distanz, Länge-3 bzw. Literal)
+    // Symbol buffer (distance, length-3 or literal)
     sym: Vec<(u16, u8)>,
     sym_end: usize,
-    // Bäume
+    // Trees
     dyn_ltree: [Ct; HEAP_SIZE],
     dyn_dtree: [Ct; 2 * D_CODES + 1],
     bl_tree: [Ct; 2 * BL_CODES + 1],
     h: Heap,
     bw: BitOut,
-    // Vergleich mit einem erwarteten Strom (Frühabbruch)
+    // Comparison with an expected stream (early abort)
     expect: Option<&'a [u8]>,
     checked: usize,
 }
@@ -520,7 +519,7 @@ impl<'a> State<'a> {
     fn update_hash(&self, h: usize, c: u8) -> usize {
         ((h << self.hash_shift) ^ c as usize) & self.hash_mask
     }
-    /// zlib `INSERT_STRING`: liefert den bisherigen Kopf der Hash-Kette.
+    /// zlib `INSERT_STRING`: returns the previous head of the hash chain.
     #[inline]
     fn insert_string(&mut self, s: usize) -> usize {
         self.ins_h = self.update_hash(self.ins_h, self.window[s + MIN_MATCH - 1]);
@@ -578,7 +577,7 @@ impl<'a> State<'a> {
                 break;
             }
         }
-        // Bytes hinter den Daten nullen, wie zlib (WIN_INIT), damit Vergleiche dort deterministisch sind
+        // Zero the bytes behind the data like zlib (WIN_INIT) so that comparisons there are deterministic
         if self.high_water < WINDOW_SIZE {
             let curr = self.strstart + self.lookahead;
             if self.high_water < curr {
@@ -593,7 +592,7 @@ impl<'a> State<'a> {
         }
     }
 
-    /// zlib `longest_match` (Variante ohne UNALIGNED_OK).
+    /// zlib `longest_match` (variant without UNALIGNED_OK).
     fn longest_match(&mut self, mut cur_match: usize) -> usize {
         let mut chain = self.max_chain;
         let scan = self.strstart;
@@ -614,7 +613,7 @@ impl<'a> State<'a> {
         loop {
             let m = cur_match;
             if w[m + best_len] == scan_end && w[m + best_len - 1] == scan_end1 && w[m] == w[scan] && w[m + 1] == w[scan + 1] {
-                // Byte 2 wird wie in zlib nicht geprüft; ab Byte 3 vergleichen, höchstens bis 258
+                // Byte 2 is not checked, as in zlib; compare from byte 3, at most up to 258
                 let len = 3 + common_prefix(s3, &w[m + 3..m + MAX_MATCH]);
                 if len > best_len {
                     self.match_start = cur_match;
@@ -724,7 +723,7 @@ impl<'a> State<'a> {
             opt_lenb = static_lenb;
         }
         if stored_len as u64 + 4 <= opt_lenb && buf_ok {
-            // gespeicherter Block
+            // stored block
             self.bw.send(last as u32, 3);
             self.bw.windup();
             let start = self.block_start as usize;
@@ -755,7 +754,7 @@ impl<'a> State<'a> {
         }
     }
 
-    /// zlib `FLUSH_BLOCK_ONLY`; liefert `false`, wenn die Ausgabe vom erwarteten Strom abweicht.
+    /// zlib `FLUSH_BLOCK_ONLY`; returns `false` if the output differs from the expected stream.
     fn flush_block(&mut self, last: bool) -> bool {
         let buf_ok = self.block_start >= 0;
         let stored_len = (self.strstart as isize - self.block_start) as usize;
@@ -764,7 +763,7 @@ impl<'a> State<'a> {
         self.check()
     }
 
-    /// Bisher erzeugte Bytes mit dem erwarteten Strom vergleichen.
+    /// Compare the bytes produced so far with the expected stream.
     fn check(&mut self) -> bool {
         let Some(e) = self.expect else { return true };
         let o = &self.bw.out;
@@ -775,7 +774,7 @@ impl<'a> State<'a> {
         true
     }
 
-    /// zlib `deflate_fast` (Stufen 1–3).
+    /// zlib `deflate_fast` (levels 1–3).
     fn deflate_fast(&mut self) -> bool {
         loop {
             if self.lookahead < MIN_LOOKAHEAD {
@@ -796,7 +795,7 @@ impl<'a> State<'a> {
                 bflush = self.tally_dist(self.strstart.wrapping_sub(self.match_start), self.match_length - MIN_MATCH);
                 self.lookahead -= self.match_length;
                 if self.match_length <= self.max_lazy && self.lookahead >= MIN_MATCH {
-                    self.match_length -= 1; // Zeichenkette an strstart steht schon in der Tabelle
+                    self.match_length -= 1; // the string at strstart is already in the table
                     loop {
                         self.strstart += 1;
                         self.insert_string(self.strstart);
@@ -824,7 +823,7 @@ impl<'a> State<'a> {
         self.flush_block(true)
     }
 
-    /// zlib `deflate_slow` (Stufen 4–9, verzögerte Match-Auswertung).
+    /// zlib `deflate_slow` (levels 4–9, lazy match evaluation).
     fn deflate_slow(&mut self) -> bool {
         loop {
             if self.lookahead < MIN_LOOKAHEAD {
@@ -850,7 +849,7 @@ impl<'a> State<'a> {
             }
             if self.prev_length >= MIN_MATCH && self.match_length <= self.prev_length {
                 let max_insert = self.strstart + self.lookahead - MIN_MATCH;
-                // Distanz modular wie in zlib (prev_match kann nach dem Verschieben übergelaufen sein)
+                // Modular distance as in zlib (prev_match may have wrapped around after sliding)
                 let bflush = self.tally_dist(self.strstart.wrapping_sub(1).wrapping_sub(self.prev_match), self.prev_length - MIN_MATCH);
                 self.lookahead -= self.prev_length - 1;
                 self.prev_length -= 2;
@@ -891,7 +890,7 @@ impl<'a> State<'a> {
     }
 }
 
-/// Länge des gemeinsamen Anfangs zweier gleich langer Bereiche.
+/// Length of the common prefix of two ranges of equal length.
 #[inline]
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
@@ -910,7 +909,7 @@ fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     i
 }
 
-/// Adler-32 (zlib-Prüfsumme).
+/// Adler-32 (zlib checksum).
 pub fn adler32(data: &[u8]) -> u32 {
     const BASE: u32 = 65521;
     const NMAX: usize = 5552;
@@ -926,7 +925,7 @@ pub fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-/// Gemeinsamer Kern: komprimiert `raw`; mit `expect` wird laufend verglichen und abgebrochen.
+/// Common core: compresses `raw`; with `expect` the output is compared continuously and aborted.
 fn run(raw: &[u8], level: i32, mem_level: i32, strategy: i32, expect: Option<&[u8]>) -> Option<Vec<u8>> {
     if !(1..=9).contains(&level) || !(1..=9).contains(&mem_level) || !(0..=1).contains(&strategy) {
         return None;
@@ -978,7 +977,7 @@ fn run(raw: &[u8], level: i32, mem_level: i32, strategy: i32, expect: Option<&[u
         checked: 0,
     };
     s.init_block();
-    // zlib-Kopf: CMF/FLG mit Stufenklasse
+    // zlib header: CMF/FLG with the level class
     let level_flags = match level {
         ..=1 => 0,
         2..=5 => 1,
@@ -1003,13 +1002,13 @@ fn run(raw: &[u8], level: i32, mem_level: i32, strategy: i32, expect: Option<&[u
     Some(s.bw.out)
 }
 
-/// Komprimiert wie `zlib deflateInit2(level, Z_DEFLATED, 15, mem_level, strategy)` + `deflate(Z_FINISH)`.
-/// Unterstützt Stufen 1–9, memLevel 1–9, Strategie 0 (default) und 1 (filtered); sonst `None`.
+/// Compresses like `zlib deflateInit2(level, Z_DEFLATED, 15, mem_level, strategy)` + `deflate(Z_FINISH)`.
+/// Supports levels 1–9, memLevel 1–9, strategy 0 (default) and 1 (filtered); otherwise `None`.
 pub fn deflate_with(raw: &[u8], level: i32, mem_level: i32, strategy: i32) -> Option<Vec<u8>> {
     run(raw, level, mem_level, strategy, None)
 }
 
-/// Erzeugt zlib mit diesen Parametern genau `expect`? Bricht beim ersten abweichenden Block ab.
+/// Does zlib produce exactly `expect` with these parameters? Stops at the first differing block.
 pub fn matches(raw: &[u8], level: i32, mem_level: i32, strategy: i32, expect: &[u8]) -> bool {
     run(raw, level, mem_level, strategy, Some(expect)).is_some_and(|o| o.len() == expect.len())
 }
@@ -1022,7 +1021,7 @@ mod tests {
         assert_eq!(adler32(b""), 1);
         assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
         let big = vec![0xFFu8; 100_000];
-        // Referenz: schrittweise ohne NMAX-Blockung (u64, kein Überlauf)
+        // Reference: step by step without NMAX blocking (u64, no overflow)
         let (mut a, mut b) = (1u64, 0u64);
         for &c in &big {
             a = (a + c as u64) % 65521;
@@ -1031,15 +1030,15 @@ mod tests {
         assert_eq!(adler32(&big), ((b << 16) | a) as u32);
     }
     #[test]
-    fn kopf_und_leer() {
-        // Leere Eingabe: zlib erzeugt 78 xx 03 00 00 00 00 01
+    fn header_and_empty() {
+        // Empty input: zlib produces 78 xx 03 00 00 00 00 01
         let o = deflate_with(b"", 6, 8, 0).unwrap();
         assert_eq!(o, [0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
         assert_eq!(deflate_with(b"", 9, 8, 0).unwrap()[..2], [0x78, 0xDA]);
         assert_eq!(deflate_with(b"", 1, 8, 0).unwrap()[..2], [0x78, 0x01]);
     }
     #[test]
-    fn ungueltige_parameter() {
+    fn invalid_parameters() {
         assert!(deflate_with(b"abc", 0, 8, 0).is_none());
         assert!(deflate_with(b"abc", 6, 10, 0).is_none());
         assert!(deflate_with(b"abc", 6, 8, 2).is_none());

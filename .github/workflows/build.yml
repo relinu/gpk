@@ -3,16 +3,16 @@ name: Build & Test
 on:
   push:
     branches: [main, rust-port]
-    tags: ['v*']          # Tag v1.2.3 pushen -> Release mit Programmen
+    tags: ['v*']          # push tag v1.2.3 -> release with programs
   pull_request:
   release:
-    types: [published]    # in der GitHub-Oberfläche veröffentlichter Release -> Programme anhängen
+    types: [published]    # release published in the GitHub UI -> attach programs
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Feste Rust-Version: neue Clippy-Regeln späterer Versionen brechen die CI nicht unbemerkt
+  # Pinned Rust version: new Clippy rules in later versions do not break CI unnoticed
   RUST: 1.97.0
 
 jobs:
@@ -22,13 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust-Werkzeuge
+      - name: Rust toolchain
         run: |
           rustup toolchain install $RUST --profile minimal --component clippy,rustfmt
           rustup default $RUST
           cargo --version
 
-      - name: Abhängigkeiten (C-Referenz, Testbilder)
+      - name: Dependencies (C reference, test images)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zlib1g-dev liblzma-dev python3-pil
@@ -41,7 +41,7 @@ jobs:
             target
           key: linux-${{ hashFiles('Cargo.lock') }}
 
-      - name: Formatierung
+      - name: Formatting
         run: cargo fmt --check
 
       - name: Clippy
@@ -49,56 +49,56 @@ jobs:
           cargo clippy --all-targets
           cargo clippy --all-targets --features cref,xz
 
-      - name: Testbilder erzeugen
-        run: python3 tools/gen_testimages.py testbilder/png testbilder/jpg
+      - name: Create test images
+        run: python3 tools/gen_testimages.py testimages/png testimages/jpg
 
-      - name: Tests und Differenztests gegen die C-Referenz (bytegleich)
+      - name: Tests and differential tests against the C reference and zlib (byte-identical)
         env:
-          GPK_PNG_DIR: ${{ github.workspace }}/testbilder/png
-          GPK_JPEG_DIR: ${{ github.workspace }}/testbilder/jpg
+          GPK_PNG_DIR: ${{ github.workspace }}/testimages/png
+          GPK_JPEG_DIR: ${{ github.workspace }}/testimages/jpg
         run: cargo test --release --features cref,xz
 
-      - name: Tests im Debug-Modus (Überlaufprüfungen aktiv)
+      - name: Tests in debug mode (overflow checks enabled)
         run: cargo test --lib
 
-      - name: gpk bauen
+      - name: Build gpk
         run: |
           cargo build --release
-          # Standard-Build: kein C-Code, einzige Abhängigkeit crc32fast (+ cfg-if)
+          # Default build: no C code, the only dependency is crc32fast (+ cfg-if)
           test "$(cargo tree -e normal --prefix none | sort -u | cut -d' ' -f1 | tr '\n' ' ')" = "cfg-if crc32fast gpk "
 
-      - name: GPK-Rauchtest (packen, entpacken, bitgenau vergleichen)
+      - name: GPK smoke test (pack, unpack, compare bit-exactly)
         run: python3 ci/smoke_test.py target/release/gpk
 
-      - name: Deterministisch (1 vs. 4 Threads), Formatgleichheit mit der C-Version
+      - name: Deterministic (1 vs. 4 threads), same format as the C version
         run: |
           make -C legacy-c/gpk gpk CFLAGS="-O2 -Wall -Wextra"
-          python3 ci/smoke_test.py --make-tree baum
-          target/release/gpk c -t 1 baum rust1.gpk
-          target/release/gpk c -t 4 -b 1 baum rust4.gpk
-          target/release/gpk c -t 4 baum rust.gpk
-          cmp rust1.gpk rust.gpk && echo "Archive unabhängig von der Threadzahl"
-          legacy-c/gpk/gpk c -t 3 baum c.gpk
-          target/release/gpk x c.gpk aus-rust && diff -r baum aus-rust
-          legacy-c/gpk/gpk x rust.gpk aus-c && diff -r baum aus-c
-          legacy-c/gpk/gpk x rust4.gpk aus-c4 && diff -r baum aus-c4
+          python3 ci/smoke_test.py --make-tree tree
+          target/release/gpk c -t 1 tree rust1.gpk
+          target/release/gpk c -t 4 -b 1 tree rust4.gpk
+          target/release/gpk c -t 4 tree rust.gpk
+          cmp rust1.gpk rust.gpk && echo "archives independent of the thread count"
+          legacy-c/gpk/gpk c -t 3 tree c.gpk
+          target/release/gpk x c.gpk out-rust && diff -r tree out-rust
+          legacy-c/gpk/gpk x rust.gpk out-c && diff -r tree out-c
+          legacy-c/gpk/gpk x rust4.gpk out-c4 && diff -r tree out-c4
 
-      - name: Optionaler xz-Kern (--features xz)
+      - name: Optional xz core (--features xz)
         run: |
           cargo build --release --features xz --target-dir target-xz
-          target-xz/release/gpk c --xz -t 2 baum xz.gpk
-          target-xz/release/gpk x xz.gpk aus-xz && diff -r baum aus-xz
-          if target/release/gpk x xz.gpk aus-ohne 2>fehler.txt; then exit 1; fi
-          grep -q "ohne xz gebaut" fehler.txt
+          target-xz/release/gpk c --xz -t 2 tree xz.gpk
+          target-xz/release/gpk x xz.gpk out-xz && diff -r tree out-xz
+          if target/release/gpk x xz.gpk out-noxz 2>error.txt; then exit 1; fi
+          grep -q "built without xz" error.txt
 
-      - name: Linux-Programm hochladen
+      - name: Upload Linux program
         uses: actions/upload-artifact@v4
         with:
           name: gpk-linux-x86_64
           path: target/release/gpk
 
   windows-exe:
-    # Keine Windows-VM: Cross-Compiling mit MinGW-w64 und Test per Wine auf Ubuntu
+    # No Windows VM: cross-compiling with MinGW-w64 and testing with Wine on Ubuntu
     name: Windows-.exe (Cross-Build + Wine)
     runs-on: ubuntu-24.04
     env:
@@ -109,12 +109,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust-Werkzeuge mit Windows-Ziel
+      - name: Rust toolchain with Windows target
         run: |
           rustup toolchain install $RUST --profile minimal --target x86_64-pc-windows-gnu
           rustup default $RUST
 
-      - name: Abhängigkeiten installieren
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64 wine wine64
@@ -127,42 +127,42 @@ jobs:
             target
           key: windows-${{ hashFiles('Cargo.lock') }}
 
-      - name: gpk.exe bauen (statisch, ohne DLL-Abhängigkeiten außer Windows-Systembibliotheken)
+      - name: Build gpk.exe (static, no DLL dependencies except Windows system libraries)
         run: |
           cargo build --release --target x86_64-pc-windows-gnu
           x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/gpk.exe | grep "DLL Name"
 
-      - name: Linux-gpk als Gegenstück bauen
+      - name: Build the Linux gpk as counterpart
         run: cargo build --release
 
-      - name: Wine vorbereiten
+      - name: Prepare Wine
         run: wineboot --init && wineserver -w
 
-      - name: Unit-Tests unter Wine
+      - name: Unit tests under Wine
         run: cargo test --release --target x86_64-pc-windows-gnu --lib
 
-      - name: GPK-Rauchtest unter Wine
+      - name: GPK smoke test under Wine
         run: python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine
 
-      - name: Systemwechsel Linux -> Windows
+      - name: Cross-platform Linux -> Windows
         run: |
           python3 ci/smoke_test.py target/release/gpk --cross-pack linux.gpk
           python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine --cross-extract linux.gpk
 
-      - name: Systemwechsel Windows -> Linux
+      - name: Cross-platform Windows -> Linux
         run: |
           python3 ci/smoke_test.py target/x86_64-pc-windows-gnu/release/gpk.exe --wine --cross-pack windows.gpk
           python3 ci/smoke_test.py target/release/gpk --cross-extract windows.gpk
 
-      - name: gpk.exe hochladen
+      - name: Upload gpk.exe
         uses: actions/upload-artifact@v4
         with:
           name: gpk-windows-x86_64
           path: target/x86_64-pc-windows-gnu/release/gpk.exe
 
   release:
-    name: Release-Dateien veröffentlichen
-    # Nur für Tags und veröffentlichte Releases, und nur wenn alle Builds und Tests grün sind
+    name: Publish release files
+    # Only for tags and published releases, and only if all builds and tests are green
     if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     needs: [linux, windows-exe]
     runs-on: ubuntu-24.04
@@ -174,16 +174,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build-Artefakte holen
+      - name: Fetch build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artefakte
+          path: artifacts
 
-      - name: Release-Pakete schnüren
+      - name: Assemble release packages
         run: |
           mkdir -p dist/gpk-$TAG-linux-x86_64 dist/gpk-$TAG-windows-x86_64
-          install -m 755 artefakte/gpk-linux-x86_64/gpk dist/gpk-$TAG-linux-x86_64/gpk
-          cp artefakte/gpk-windows-x86_64/gpk.exe dist/gpk-$TAG-windows-x86_64/
+          install -m 755 artifacts/gpk-linux-x86_64/gpk dist/gpk-$TAG-linux-x86_64/gpk
+          cp artifacts/gpk-windows-x86_64/gpk.exe dist/gpk-$TAG-windows-x86_64/
           for d in dist/gpk-$TAG-*; do cp README.md "$d/README.md"; cp docs/GPK.md "$d/GPK.md"; done
           cd dist
           tar -czf gpk-$TAG-linux-x86_64.tar.gz gpk-$TAG-linux-x86_64
@@ -191,7 +191,7 @@ jobs:
           sha256sum gpk-$TAG-*.tar.gz gpk-$TAG-*.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Release anlegen (falls nötig) und Dateien hochladen
+      - name: Create the release (if needed) and upload the files
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "GPK $TAG" --generate-notes --verify-tag

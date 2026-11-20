@@ -1,4 +1,4 @@
-//! Differenztests: Rust-Port gegen C-Referenz (legacy-c/). Nur mit `--features cref`.
+//! Differential tests: Rust port vs. C reference (legacy-c/). Only with `--features cref`.
 #![cfg(feature = "cref")]
 use gpk::cref::*;
 use gpk::filters::{self, FSpec, FT_COUNT, FT_SPLIT, FT_WPRED};
@@ -24,7 +24,7 @@ fn random_spec(r: &mut Rng) -> FSpec {
     }
     f
 }
-/// Testdaten mit Struktur (x86-Opcodes, Wiederholungen, Rauschen)
+/// Test data with structure (x86 opcodes, repetitions, noise)
 pub fn test_data(r: &mut Rng, n: usize) -> Vec<u8> {
     let mode = r.next() % 4;
     (0..n)
@@ -38,7 +38,7 @@ pub fn test_data(r: &mut Rng, n: usize) -> Vec<u8> {
 }
 
 #[test]
-fn filters_identisch_zu_c() {
+fn filters_identical_to_c() {
     let mut r = Rng::new(42);
     for _ in 0..3000 {
         let n = (r.next() % 30000) as usize;
@@ -49,18 +49,18 @@ fn filters_identisch_zu_c() {
         filters::encode(&f, &data, &mut rust, off);
         let mut c = vec![0u8; n];
         unsafe { filter_encode(&to_c(&f), data.as_ptr(), c.as_mut_ptr(), n, off) };
-        assert_eq!(rust, c, "encode weicht ab: {:?} n={} off={}", f, n, off);
-        // Kreuz: C-kodiertes mit Rust dekodieren
+        assert_eq!(rust, c, "encode differs: {:?} n={} off={}", f, n, off);
+        // Cross check: decode C-encoded data with Rust
         let mut t = c.clone();
         let mut back = vec![0u8; n];
         filters::decode(&f, &mut t, &mut back, off);
-        assert_eq!(back, data, "decode weicht ab: {:?}", f);
+        assert_eq!(back, data, "decode differs: {:?}", f);
     }
 }
 
 fn mixed_data(r: &mut Rng, n: usize) -> Vec<u8> {
     let words: [&[u8]; 6] =
-        [b"Drache ", b"Schwert ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\xE8\x10\x20\x00\x00", b"func() {\n    return 1;\n}\n"];
+        [b"dragon ", b"sword ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f", b"\xE8\x10\x20\x00\x00", b"func() {\n    return 1;\n}\n"];
     let mut v = Vec::with_capacity(n);
     let noise = r.next() % 3;
     while v.len() < n {
@@ -75,7 +75,7 @@ fn mixed_data(r: &mut Rng, n: usize) -> Vec<u8> {
 }
 
 #[test]
-fn glz_identisch_zu_c() {
+fn glz_identical_to_c() {
     let mut r = Rng::new(7);
     for case in 0..40 {
         let n = [0usize, 3, 100, 5000, 70_000, 300_000, 1_200_000][case % 7];
@@ -87,8 +87,8 @@ fn glz_identisch_zu_c() {
         let mut c = vec![0u8; cap];
         let cn = unsafe { glz_compress(d.as_ptr(), n, c.as_mut_ptr(), cap, level, if nf { 1 } else { 0 }) };
         c.truncate(cn);
-        assert_eq!(rust, c, "GLZ weicht ab: Fall {case}, n={n}, Stufe {level}, ohne Filter {nf}");
-        // Kreuz-Dekodierung
+        assert_eq!(rust, c, "GLZ differs: case {case}, n={n}, level {level}, no filter {nf}");
+        // Cross decoding
         assert_eq!(gpk::glz::decompress(&c, usize::MAX).unwrap(), d);
         let mut back = vec![0u8; n + 1];
         let bn = unsafe { glz_decompress(rust.as_ptr(), rust.len(), back.as_mut_ptr(), n + 1) };
@@ -98,7 +98,7 @@ fn glz_identisch_zu_c() {
 }
 
 #[test]
-fn lzrc_identisch_zu_c() {
+fn lzrc_identical_to_c() {
     let mut r = Rng::new(11);
     for case in 0..24 {
         let n = [0usize, 1, 5, 300, 9000, 100_000, 700_000, 2_000_000][case % 8];
@@ -120,10 +120,10 @@ fn lzrc_identisch_zu_c() {
         let mut c = vec![0u8; cap];
         let cn = unsafe { lzrc_compress(d.as_ptr(), n, c.as_mut_ptr(), cap, &cp) };
         c.truncate(cn);
-        assert_eq!(rust.len(), c.len(), "LZRC-Größe weicht ab: Fall {case}, n={n}, {p:?}");
-        assert!(rust == c, "LZRC-Bytes weichen ab: Fall {case}, n={n}, {p:?}");
+        assert_eq!(rust.len(), c.len(), "LZRC size differs: case {case}, n={n}, {p:?}");
+        assert!(rust == c, "LZRC bytes differ: case {case}, n={n}, {p:?}");
         let mut back = vec![0u8; n];
-        gpk::lzrc::decompress(&c, &mut back).expect("Rust dekodiert C-Daten");
+        gpk::lzrc::decompress(&c, &mut back).expect("Rust decodes C data");
         assert_eq!(back, d);
         let mut back2 = vec![0u8; n];
         assert_eq!(unsafe { lzrc_decompress(rust.as_ptr(), rust.len(), back2.as_mut_ptr(), n) }, 1);
@@ -132,7 +132,7 @@ fn lzrc_identisch_zu_c() {
 }
 
 #[test]
-fn tcm_identisch_zu_c() {
+fn tcm_identical_to_c() {
     let mut r = Rng::new(13);
     let text = std::fs::read_to_string("legacy-c/gpk/gpk.c").unwrap();
     for case in 0..8 {
@@ -150,7 +150,7 @@ fn tcm_identisch_zu_c() {
         let mut c = vec![0u8; cap];
         let cn = unsafe { tcm_compress(d.as_ptr(), n, c.as_mut_ptr(), cap) };
         c.truncate(cn);
-        assert!(rust == c, "TCM weicht ab: Fall {case}, n={n} ({} vs {} Bytes)", rust.len(), c.len());
+        assert!(rust == c, "TCM differs: case {case}, n={n} ({} vs {} bytes)", rust.len(), c.len());
         let mut back = vec![0u8; n];
         gpk::tcm::decompress(&c, &mut back);
         assert_eq!(back, d);
@@ -158,7 +158,7 @@ fn tcm_identisch_zu_c() {
 }
 
 #[test]
-fn pxc_identisch_zu_c() {
+fn pxc_identical_to_c() {
     let mut r = Rng::new(17);
     for it in 0..40 {
         let (w, h, ch) = (1 + r.next() % 120, 1 + r.next() % 80, 1 + (it % 4) as usize);
@@ -180,14 +180,14 @@ fn pxc_identisch_zu_c() {
         let rust = gpk::pxc::encode(&px, w, h, ch).unwrap();
         let mut cn = 0usize;
         let c = unsafe { take(pxc_encode(px.as_ptr(), w, h, ch as i32, &mut cn), cn) }.unwrap();
-        assert!(rust == c, "PXC weicht ab: {it} ({w}x{h}x{ch})");
+        assert!(rust == c, "PXC differs: {it} ({w}x{h}x{ch})");
         let mut out = vec![0u8; n];
         assert!(gpk::pxc::decode(&c, &mut out, w, h, ch));
         assert_eq!(out, px);
     }
 }
 
-/// Echte PNGs: aus GPK_PNG_DIR (CI erzeugt sie mit Pillow) und aus dem System (falls vorhanden)
+/// Real PNGs: from GPK_PNG_DIR (CI creates them with Pillow) and from the system (if present)
 fn real_pngs() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
     let extra = std::env::var("GPK_PNG_DIR").unwrap_or_default();
@@ -202,7 +202,7 @@ fn real_pngs() -> Vec<std::path::PathBuf> {
 }
 
 #[test]
-fn pngx_identisch_zu_c() {
+fn pngx_identical_to_c() {
     let files = real_pngs();
     let (mut tested, mut converted) = (0, 0);
     for f in &files {
@@ -211,9 +211,9 @@ fn pngx_identisch_zu_c() {
             let rust = gpk::pngx::forward(&png, mode);
             let mut tn = 0usize;
             let c = unsafe { take(pngx_forward_mode(png.as_ptr(), png.len(), mode as i32, &mut tn), tn) };
-            assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {} Modus {mode}", f.display());
+            assert_eq!(rust.is_some(), c.is_some(), "acceptance differs: {} mode {mode}", f.display());
             if let (Some(rv), Some(cv)) = (&rust, &c) {
-                assert!(rv == cv, "PNGX weicht ab: {} Modus {mode}", f.display());
+                assert!(rv == cv, "PNGX differs: {} mode {mode}", f.display());
                 let mut out = vec![0u8; png.len()];
                 assert!(gpk::pngx::inverse(cv, &mut out));
                 assert_eq!(out, png);
@@ -223,17 +223,17 @@ fn pngx_identisch_zu_c() {
         }
         assert_eq!(gpk::pngx::channels(&png), unsafe { pngx_channels(png.as_ptr(), png.len()) } as usize);
     }
-    eprintln!("PNG: {tested} Prüfungen, {converted} umgewandelt");
+    eprintln!("PNG: {tested} checks, {converted} transformed");
     assert!(converted > 0 || files.is_empty());
 }
 
 #[test]
-fn jpgx_identisch_zu_c() {
-    // Eingebettete Beispiele + optional weitere Testbilder aus GPK_JPEG_DIR (CI erzeugt sie mit Pillow)
+fn jpgx_identical_to_c() {
+    // Embedded samples + optionally more test images from GPK_JPEG_DIR (CI creates them with Pillow)
     let mut files: Vec<(String, Vec<u8>)> =
-        gpk::testutil::jpeg_samples().into_iter().enumerate().map(|(i, d)| (format!("Beispiel {i}"), d)).collect();
+        gpk::testutil::jpeg_samples().into_iter().enumerate().map(|(i, d)| (format!("sample {i}"), d)).collect();
     if let Ok(dir) = std::env::var("GPK_JPEG_DIR") {
-        let mut paths: Vec<_> = std::fs::read_dir(&dir).expect("GPK_JPEG_DIR nicht lesbar").flatten().map(|e| e.path()).collect();
+        let mut paths: Vec<_> = std::fs::read_dir(&dir).expect("GPK_JPEG_DIR not readable").flatten().map(|e| e.path()).collect();
         paths.retain(|p| p.extension().is_some_and(|e| e == "jpg" || e == "jpeg"));
         paths.sort();
         files.extend(paths.into_iter().map(|p| (p.display().to_string(), std::fs::read(&p).unwrap())));
@@ -243,10 +243,10 @@ fn jpgx_identisch_zu_c() {
         let rust = gpk::jpgx::forward(jpg);
         let mut tn = 0usize;
         let c = unsafe { take(jpgx_forward(jpg.as_ptr(), jpg.len(), &mut tn), tn) };
-        assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {f}");
+        assert_eq!(rust.is_some(), c.is_some(), "acceptance differs: {f}");
         match (&rust, &c) {
             (Some(rv), Some(cv)) => {
-                assert!(rv == cv, "JPGX weicht ab: {f}");
+                assert!(rv == cv, "JPGX differs: {f}");
                 let mut out = vec![0u8; jpg.len()];
                 assert!(gpk::jpgx::inverse(cv, &mut out) && &out == jpg);
                 ok += 1;
@@ -254,22 +254,22 @@ fn jpgx_identisch_zu_c() {
             _ => rejected += 1,
         }
     }
-    eprintln!("JPEG: {ok} bytegleich umgewandelt, {rejected} von beiden abgelehnt");
+    eprintln!("JPEG: {ok} transformed byte-identically, {rejected} rejected by both");
 }
 
-/// Testdaten für Deflate: Text, Zufall, Nullen, Bildzeilen, weite Wiederholungen (> 32 KiB),
-/// kurze Matches in großer Entfernung (TOO_FAR), Mischungen über mehrere Fensterverschiebungen.
+/// Test data for Deflate: text, random, zeros, image rows, distant repetitions (> 32 KiB),
+/// short matches at a large distance (TOO_FAR), mixtures across several window slides.
 #[allow(clippy::vec_init_then_push)]
 fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
     let mut r = Rng::new(77);
     let mut v: Vec<(String, Vec<u8>)> = Vec::new();
-    v.push(("leer".into(), Vec::new()));
-    v.push(("1 Byte".into(), b"x".to_vec()));
+    v.push(("empty".into(), Vec::new()));
+    v.push(("1 byte".into(), b"x".to_vec()));
     v.push(("text".into(), test_data(&mut r, 150_000)));
-    v.push(("zufall".into(), r.bytes(100_000)));
-    v.push(("nullen".into(), vec![0u8; 300_000]));
-    v.push(("gemischt".into(), mixed_data(&mut r, 400_000)));
-    // Bildartig: Zeilen mit Filterbyte, Verläufen und Rauschen
+    v.push(("random".into(), r.bytes(100_000)));
+    v.push(("zeros".into(), vec![0u8; 300_000]));
+    v.push(("mixed".into(), mixed_data(&mut r, 400_000)));
+    // Image-like: rows with a filter byte, gradients and noise
     let mut img = Vec::new();
     for y in 0..300u32 {
         img.push((y % 5) as u8);
@@ -277,8 +277,8 @@ fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
             img.push(((x * 3 + y * 7) & 0xFF) as u8 ^ (r.next() % 4) as u8);
         }
     }
-    v.push(("bild".into(), img));
-    // Wiederholung eines Blocks in > 32 KiB Abstand und kurze Matches weit weg
+    v.push(("image".into(), img));
+    // Repetition of a block at > 32 KiB distance and short matches far away
     let block = r.bytes(40_000);
     let mut far = block.clone();
     far.extend(r.bytes(5_000));
@@ -287,8 +287,8 @@ fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
         far.extend_from_slice(&[(i % 7) as u8, b'a' + (i % 3) as u8, b'z']);
         far.extend(r.bytes(2));
     }
-    v.push(("weit".into(), far));
-    // Viele kurze Wiederholungen mit Abständen um 4096 (TOO_FAR-Grenze)
+    v.push(("distant".into(), far));
+    // Many short repetitions at distances around 4096 (TOO_FAR limit)
     let mut tf = r.bytes(5000);
     for i in 0..60_000usize {
         let c = tf[i + 905];
@@ -299,40 +299,40 @@ fn deflate_corpus() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-fn deflate_bitgenau_wie_zlib() {
+fn deflate_bit_exact_like_zlib() {
     let corpus = deflate_corpus();
     let mut n = 0;
     for (name, d) in &corpus {
-        // kleine/mittlere Daten: alle Parameter; große: Auswahl
+        // small/medium data: all parameters; large data: a selection
         let mems: &[i32] = if d.len() > 200_000 { &[1, 8, 9] } else { &[1, 2, 5, 8, 9] };
         for &strat in &[0, 1] {
             for &mem in mems {
                 for lvl in 1..=9 {
                     let z = gpk::zlib::deflate_with(d, lvl, mem, strat).unwrap();
                     let o = gpk::deflate::deflate_with(d, lvl, mem, strat).unwrap();
-                    assert!(o == z, "{name}: Stufe {lvl}, memLevel {mem}, Strategie {strat}: {} vs {} B", o.len(), z.len());
+                    assert!(o == z, "{name}: level {lvl}, memLevel {mem}, strategy {strat}: {} vs {} B", o.len(), z.len());
                     assert!(gpk::deflate::matches(d, lvl, mem, strat, &z));
                     n += 1;
                 }
             }
         }
     }
-    eprintln!("Deflate: {n} Kombinationen bytegleich zu zlib");
+    eprintln!("Deflate: {n} combinations byte-identical to zlib");
 }
 
 #[test]
-fn deflate_grosse_daten_wie_zlib() {
-    // mehrere MB: viele Fensterverschiebungen und Blöcke
+fn deflate_large_data_like_zlib() {
+    // several MB: many window slides and blocks
     let mut r = Rng::new(78);
     let d = mixed_data(&mut r, 3_000_000);
     for (lvl, mem, strat) in [(1, 8, 0), (3, 9, 0), (5, 8, 1), (6, 8, 0), (9, 9, 0), (9, 8, 1)] {
         let z = gpk::zlib::deflate_with(&d, lvl, mem, strat).unwrap();
-        assert!(gpk::deflate::deflate_with(&d, lvl, mem, strat).unwrap() == z, "Stufe {lvl} memLevel {mem} Strategie {strat}");
+        assert!(gpk::deflate::deflate_with(&d, lvl, mem, strat).unwrap() == z, "level {lvl} memLevel {mem} strategy {strat}");
     }
 }
 
 #[test]
-fn matches_bricht_bei_abweichung_ab() {
+fn matches_stops_on_difference() {
     let mut r = Rng::new(79);
     let d = test_data(&mut r, 200_000);
     let z = gpk::zlib::deflate_with(&d, 6, 8, 0).unwrap();
@@ -344,7 +344,7 @@ fn matches_bricht_bei_abweichung_ab() {
 }
 
 #[test]
-fn inflate_wie_zlib() {
+fn inflate_like_zlib() {
     let mut r = Rng::new(80);
     let mut streams = Vec::new();
     for (_, d) in deflate_corpus() {
@@ -355,7 +355,7 @@ fn inflate_wie_zlib() {
     let mut agree = 0;
     for z in &streams {
         assert_eq!(gpk::inflate::inflate_zlib(z, 1 << 24), gpk::zlib::inflate_all(z, 1 << 24));
-        // Beschädigungen: gleiche Annahme/Ablehnung und gleiches Ergebnis wie zlib
+        // Corruptions: same acceptance/rejection and same result as zlib
         for _ in 0..300 {
             let mut m = z.clone();
             match r.next() % 4 {
@@ -377,12 +377,12 @@ fn inflate_wie_zlib() {
             let theirs = gpk::zlib::inflate_all(&m, 1 << 24);
             assert!(
                 mine == theirs,
-                "Abweichung bei beschädigtem Strom: eigen {:?} B, zlib {:?} B",
+                "difference on a corrupted stream: own {:?} B, zlib {:?} B",
                 mine.map(|v| v.len()),
                 theirs.map(|v| v.len())
             );
             agree += 1;
         }
     }
-    eprintln!("Inflate: {agree} beschädigte Ströme gleich behandelt wie zlib");
+    eprintln!("Inflate: {agree} corrupted streams handled like zlib");
 }

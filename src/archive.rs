@@ -1,11 +1,11 @@
-//! Archivformat, Packen, Entpacken und Auflisten (Port von `legacy-c/gpk/gpk.c`).
+//! Archive format, packing, unpacking and listing (port of `legacy-c/gpk/gpk.c`).
 //!
-//! Format (Little Endian, identisch zur C-Version):
-//! `"GPK1" | u64 index_off | u64 index_csize | u64 index_usize | u8 index_codec | Blöcke | Index`
+//! Format (little endian, identical to the C version):
+//! `"GPK1" | u64 index_off | u64 index_csize | u64 index_usize | u8 index_codec | blocks | index`
 //!
-//! Gleiche Eingabe und Optionen ergeben bytegleiche Archive wie die C-Version.
-//! Dateien werden nicht eingeblendet (kein mmap), sondern bereichsweise gelesen:
-//! kein `unsafe`, und der RAM-Bedarf bleibt unabhängig von der Build-Größe.
+//! The same input and options always produce byte-identical archives, independent of the
+//! number of threads. Files are not memory-mapped but read range by range: no `unsafe`, and
+//! the RAM requirement does not depend on the build size.
 
 use crate::filters::{self, FSpec, FILTER_NAMES, FT_BCJ, FT_COUNT, FT_DELTA, FT_NONE, FT_SHUF, FT_SHUFDELTA, FT_SPLIT, FT_WPRED, FT_X86S};
 use crate::{glz, jpgx, lzrc, pngx, tcm};
@@ -20,8 +20,8 @@ const NONE: u32 = u32::MAX;
 const SAMPLE: usize = 384 << 10;
 const HDR_SIZE: usize = 4 + 8 + 8 + 8 + 1;
 const MAX_XFORM_SSIZE: u64 = 1 << 30;
-/// Blockgröße für Text mit dem Context-Mixing-Kern (TCM entpackt nur ~1,5 MB/s je Thread;
-/// 4 MiB: gemessen +0,45 % Textgröße gegenüber 8 MiB, Entpacken deutlich paralleler)
+/// Block size for text with the context-mixing core (TCM unpacks only ~1.5 MB/s per thread;
+/// 4 MiB: measured +0.45 % text size compared to 8 MiB, unpacking much more parallel)
 const TEXT_BLOCK: u64 = 4 << 20;
 
 pub const CODEC_STORED: u8 = 0;
@@ -35,7 +35,7 @@ const CL_TEXTURE: usize = 2;
 const CL_BINARY: usize = 3;
 const CL_RAW: usize = 4;
 const CL_N: usize = 5;
-const CLASS_NAMES: [&str; CL_N] = ["Text/Skripte", "x86-Programmcode", "BCn-Texturen (DDS)", "sonstige Binärdaten", "bereits komprimiert"];
+const CLASS_NAMES: [&str; CL_N] = ["text/scripts", "x86 code", "BCn textures (DDS)", "other binary data", "already compressed"];
 
 const E_FILE: u8 = 0;
 const E_DIR: u8 = 1;
@@ -44,7 +44,7 @@ const XF_NONE: u8 = 0;
 const XF_PNG: u8 = 1;
 const XF_JPG: u8 = 2;
 
-/// Fehler mit verständlicher Meldung (wird von `main` ausgegeben).
+/// Error with a readable message (printed by `main`).
 #[derive(Debug)]
 pub struct Error(pub String);
 impl std::fmt::Display for Error {
@@ -61,7 +61,7 @@ fn io_err(ctx: &str, p: &Path, e: io::Error) -> Error {
     Error(format!("{ctx}: {} ({e})", p.display()))
 }
 
-/// Optionen beim Packen.
+/// Options for packing.
 #[derive(Clone, Debug)]
 pub struct Options {
     pub level: i32,
@@ -93,11 +93,11 @@ impl Default for Options {
 }
 
 // ---------------------------------------------------------------------------
-// Datenstrukturen
+// Data structures
 // ---------------------------------------------------------------------------
 #[derive(Clone, Debug, Default)]
 struct Entry {
-    path: Vec<u8>, // relativ, '/' als Trenner, Bytes wie im Archiv
+    path: Vec<u8>, // relative, '/' as separator, bytes as stored in the archive
     typ: u8,
     mode: u32,
     mtime: i64,
@@ -148,7 +148,7 @@ struct Block {
 }
 
 // ---------------------------------------------------------------------------
-// Plattform: Pfade, positioniertes Lesen/Schreiben
+// Platform: paths, positioned reads/writes
 // ---------------------------------------------------------------------------
 #[cfg(unix)]
 fn path_from_bytes(root: &Path, rel: &[u8]) -> Result<PathBuf> {
@@ -159,7 +159,7 @@ fn path_from_bytes(root: &Path, rel: &[u8]) -> Result<PathBuf> {
 fn path_from_bytes(root: &Path, rel: &[u8]) -> Result<PathBuf> {
     match std::str::from_utf8(rel) {
         Ok(s) => Ok(root.join(s)),
-        Err(_) => err(format!("Pfad ist kein UTF-8: {}", String::from_utf8_lossy(rel))),
+        Err(_) => err(format!("path is not UTF-8: {}", String::from_utf8_lossy(rel))),
     }
 }
 #[cfg(unix)]
@@ -171,7 +171,7 @@ fn name_bytes(n: &std::ffi::OsStr) -> Result<Vec<u8>> {
 fn name_bytes(n: &std::ffi::OsStr) -> Result<Vec<u8>> {
     match n.to_str() {
         Some(s) => Ok(s.as_bytes().to_vec()),
-        None => err(format!("Dateiname nicht als Unicode darstellbar: {}", n.to_string_lossy())),
+        None => err(format!("file name cannot be represented as Unicode: {}", n.to_string_lossy())),
     }
 }
 
@@ -215,7 +215,7 @@ fn portable_mode(md: &fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     md.permissions().mode() & 0o7777
 }
-/// Windows kennt keine Unix-Rechte: portable Standardwerte (Ordner 0755, Dateien 0644, schreibgeschützt 0444).
+/// Windows has no Unix permissions: portable defaults (directories 0755, files 0644, read-only 0444).
 #[cfg(not(unix))]
 fn portable_mode(md: &fs::Metadata) -> u32 {
     if md.is_dir() {
@@ -236,25 +236,25 @@ fn mtime_secs(md: &fs::Metadata) -> i64 {
     }
 }
 
-/// Zeitmessung der Phasen (Ausgabe mit Umgebungsvariable GPK_ZEITEN=1).
+/// Timing of the phases (printed with environment variable GPK_TIMINGS=1).
 struct Phases {
     t: Instant,
     on: bool,
 }
 impl Phases {
     fn new() -> Self {
-        Phases { t: Instant::now(), on: std::env::var_os("GPK_ZEITEN").is_some() }
+        Phases { t: Instant::now(), on: std::env::var_os("GPK_TIMINGS").is_some() }
     }
     fn mark(&mut self, name: &str) {
         if self.on {
-            eprintln!("[Zeit] {name}: {:.2} s", self.t.elapsed().as_secs_f64());
+            eprintln!("[time] {name}: {:.2} s", self.t.elapsed().as_secs_f64());
         }
         self.t = Instant::now();
     }
 }
 
 // ---------------------------------------------------------------------------
-// Parallelität
+// Parallelism
 // ---------------------------------------------------------------------------
 fn parallel_for(n: usize, threads: usize, f: impl Fn(usize) + Sync) {
     let next = AtomicUsize::new(0);
@@ -271,12 +271,12 @@ fn parallel_for(n: usize, threads: usize, f: impl Fn(usize) + Sync) {
         }
     });
 }
-/// Paralleles Map mit Ergebnissen in Eingabereihenfolge.
+/// Parallel map with results in input order.
 fn parallel_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     parallel_map_by_cost(&[], n, threads, f)
 }
-/// Wie `parallel_map`, aber die teuersten Aufgaben zuerst (`cost[i]`; leer = Eingabereihenfolge):
-/// vermeidet, dass am Ende ein großer Brocken allein auf einem Thread läuft.
+/// Like `parallel_map`, but the most expensive tasks first (`cost[i]`; empty = input order):
+/// avoids a single large chunk running alone on one thread at the end.
 fn parallel_map_by_cost<T: Send>(cost: &[u64], n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let mut order: Vec<usize> = (0..n).collect();
     if cost.len() == n {
@@ -288,17 +288,17 @@ fn parallel_map_by_cost<T: Send>(cost: &[u64], n: usize, threads: usize, f: impl
         let v = f(i);
         out.lock().unwrap()[i] = Some(v);
     });
-    out.into_inner().unwrap().into_iter().map(|v| v.expect("Ergebnis fehlt")).collect()
+    out.into_inner().unwrap().into_iter().map(|v| v.expect("missing result")).collect()
 }
 
 // ---------------------------------------------------------------------------
-// Scannen, Hashen, Deduplizieren
+// Scanning, hashing, deduplication
 // ---------------------------------------------------------------------------
 fn scan(root: &Path, rel: &[u8], out: &mut Vec<Entry>) -> Result<()> {
     let dir = path_from_bytes(root, rel)?;
     let mut names = Vec::new();
-    for de in fs::read_dir(&dir).map_err(|e| io_err("Kann Ordner nicht öffnen", &dir, e))? {
-        let de = de.map_err(|e| io_err("Kann Ordner nicht lesen", &dir, e))?;
+    for de in fs::read_dir(&dir).map_err(|e| io_err("cannot open directory", &dir, e))? {
+        let de = de.map_err(|e| io_err("cannot read directory", &dir, e))?;
         names.push(name_bytes(&de.file_name())?);
     }
     names.sort();
@@ -309,7 +309,7 @@ fn scan(root: &Path, rel: &[u8], out: &mut Vec<Entry>) -> Result<()> {
         }
         r.extend_from_slice(&name);
         let f = path_from_bytes(root, &r)?;
-        let md = if cfg!(unix) { fs::symlink_metadata(&f) } else { fs::metadata(&f) }.map_err(|e| io_err("stat fehlgeschlagen", &f, e))?;
+        let md = if cfg!(unix) { fs::symlink_metadata(&f) } else { fs::metadata(&f) }.map_err(|e| io_err("stat failed", &f, e))?;
         let mut e = Entry { path: r.clone(), mode: portable_mode(&md), mtime: mtime_secs(&md), content: NONE, ..Default::default() };
         let ft = md.file_type();
         if ft.is_dir() {
@@ -321,7 +321,7 @@ fn scan(root: &Path, rel: &[u8], out: &mut Vec<Entry>) -> Result<()> {
             e.size = md.len();
             out.push(e);
         } else if ft.is_symlink() {
-            let t = fs::read_link(&f).map_err(|e| io_err("readlink fehlgeschlagen", &f, e))?;
+            let t = fs::read_link(&f).map_err(|e| io_err("readlink failed", &f, e))?;
             e.typ = E_LINK;
             e.link = name_bytes(t.as_os_str())?;
             out.push(e);
@@ -331,11 +331,11 @@ fn scan(root: &Path, rel: &[u8], out: &mut Vec<Entry>) -> Result<()> {
 }
 
 fn crc_file(p: &Path) -> Result<u32> {
-    let mut f = File::open(p).map_err(|e| io_err("Kann Datei nicht lesen", p, e))?;
+    let mut f = File::open(p).map_err(|e| io_err("cannot read file", p, e))?;
     let mut h = crc32fast::Hasher::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
-        let n = f.read(&mut buf).map_err(|e| io_err("Lesefehler", p, e))?;
+        let n = f.read(&mut buf).map_err(|e| io_err("read error", p, e))?;
         if n == 0 {
             break;
         }
@@ -344,15 +344,15 @@ fn crc_file(p: &Path) -> Result<u32> {
     Ok(h.finalize())
 }
 fn same_file(a: &Path, b: &Path) -> Result<bool> {
-    let mut fa = File::open(a).map_err(|e| io_err("Kann Datei nicht lesen", a, e))?;
-    let mut fb = File::open(b).map_err(|e| io_err("Kann Datei nicht lesen", b, e))?;
+    let mut fa = File::open(a).map_err(|e| io_err("cannot read file", a, e))?;
+    let mut fb = File::open(b).map_err(|e| io_err("cannot read file", b, e))?;
     let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     loop {
-        let na = fa.read(&mut ba).map_err(|e| io_err("Lesefehler", a, e))?;
+        let na = fa.read(&mut ba).map_err(|e| io_err("read error", a, e))?;
         if na == 0 {
-            return Ok(fb.read(&mut bb[..1]).map_err(|e| io_err("Lesefehler", b, e))? == 0);
+            return Ok(fb.read(&mut bb[..1]).map_err(|e| io_err("read error", b, e))? == 0);
         }
-        fb.read_exact(&mut bb[..na]).map_err(|e| io_err("Lesefehler", b, e))?;
+        fb.read_exact(&mut bb[..na]).map_err(|e| io_err("read error", b, e))?;
         if ba[..na] != bb[..na] {
             return Ok(false);
         }
@@ -360,7 +360,7 @@ fn same_file(a: &Path, b: &Path) -> Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
-// Klassifikation & Filterwahl
+// Classification & filter choice
 // ---------------------------------------------------------------------------
 fn is_text(s: &[u8]) -> bool {
     let s = &s[..s.len().min(65536)];
@@ -376,7 +376,7 @@ fn le16(d: &[u8], i: usize) -> u16 {
 fn le32(d: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]])
 }
-/// x86/x64-Programm (ELF oder PE)? `read` liest Bytes an beliebiger Position.
+/// x86/x64 program (ELF or PE)? `read` reads bytes at an arbitrary position.
 fn is_x86(head: &[u8], n: u64, read: &dyn Fn(u64, usize) -> Option<Vec<u8>>) -> bool {
     if n >= 20 && head.len() >= 20 && &head[..4] == b"\x7fELF" {
         let m = le16(head, 18);
@@ -395,7 +395,7 @@ fn is_x86(head: &[u8], n: u64, read: &dyn Fn(u64, usize) -> Option<Vec<u8>>) -> 
     }
     false
 }
-/// DDS mit BC1..BC5: Feld-Split (Endpunkte vs. Indizes).
+/// DDS with BC1..BC5: field split (endpoints vs. indices).
 fn dds_split(d: &[u8], n: u64) -> Option<FSpec> {
     if n < 128 || d.len() < 128 || &d[..4] != b"DDS " {
         return None;
@@ -444,7 +444,7 @@ fn delta_entropy(p: &[u8], s: usize) -> f64 {
 fn lz_size(d: &[u8]) -> usize {
     lzrc::compress(d, &lzrc::Params::level(2)).len()
 }
-/// Größenschätzung nach LZRC; für PNG-Rohdaten zusätzlich mit den naheliegenden Filtern.
+/// Size estimate after LZRC; for raw PNG data also with the obvious filters.
 fn lz_estimate(d: &[u8], bpp: usize) -> usize {
     let mut best = lz_size(d);
     if bpp > 1 {
@@ -458,7 +458,7 @@ fn lz_estimate(d: &[u8], bpp: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Packen
+// Packing
 // ---------------------------------------------------------------------------
 struct Spill {
     path: PathBuf,
@@ -468,12 +468,12 @@ impl Spill {
     fn write(&self, d: &[u8]) -> Result<u64> {
         let mut g = self.w.lock().unwrap();
         if g.is_none() {
-            let f = File::create(&self.path).map_err(|e| io_err("Kann Auslagerungsdatei nicht anlegen", &self.path, e))?;
+            let f = File::create(&self.path).map_err(|e| io_err("cannot create spill file", &self.path, e))?;
             *g = Some((f, 0));
         }
         let (f, end) = g.as_mut().unwrap();
         let off = *end;
-        write_at(f, d, off).map_err(|e| io_err("Schreibfehler in Auslagerungsdatei", &self.path, e))?;
+        write_at(f, d, off).map_err(|e| io_err("write error in spill file", &self.path, e))?;
         *end += d.len() as u64;
         Ok(off)
     }
@@ -489,21 +489,21 @@ impl<'a> Packer<'a> {
     fn orig_path(&self, c: &Content) -> Result<PathBuf> {
         path_from_bytes(self.root, &c.path)
     }
-    /// Bereich des zu komprimierenden Datenstroms (Original oder ausgelagerte Umwandlung).
+    /// Range of the stream to compress (original file or spilled transformation).
     fn read_stream(&self, c: &Content, off: u64, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
         if c.xform != XF_NONE {
-            let f = self.spill_read.as_ref().ok_or_else(|| Error("Auslagerungsdatei fehlt".into()))?;
-            read_at(f, &mut buf, c.spill_off + off).map_err(|e| io_err("Lesefehler", &self.spill.path, e))?;
+            let f = self.spill_read.as_ref().ok_or_else(|| Error("spill file missing".into()))?;
+            read_at(f, &mut buf, c.spill_off + off).map_err(|e| io_err("read error", &self.spill.path, e))?;
         } else {
             let p = self.orig_path(c)?;
-            let f = File::open(&p).map_err(|e| io_err("Kann Datei nicht lesen", &p, e))?;
-            read_at(&f, &mut buf, off).map_err(|e| io_err("Lesefehler (Datei verändert?)", &p, e))?;
+            let f = File::open(&p).map_err(|e| io_err("cannot read file", &p, e))?;
+            read_at(&f, &mut buf, off).map_err(|e| io_err("read error (file changed?)", &p, e))?;
         }
         Ok(buf)
     }
 
-    /// PNG-/JPEG-Rekompression versuchen (nur übernehmen, wenn sie gewinnt).
+    /// Try PNG/JPEG recompression (only kept if it wins).
     fn xform_one(&self, c: &Content) -> Result<Option<(u8, u64, u64)>> {
         if c.size < 64 {
             return Ok(None);
@@ -554,7 +554,7 @@ impl<'a> Packer<'a> {
         Ok(Some((XF_PNG, t.len() as u64, off)))
     }
 
-    /// Klasse und Filter je Inhalt (Probekompression mit LZRC).
+    /// Class and filter per content (trial compression with LZRC).
     fn classify_one(&self, c: &Content) -> Result<(usize, FSpec)> {
         let n = c.ssize;
         let none = FSpec::default();
@@ -572,7 +572,7 @@ impl<'a> Packer<'a> {
         let sn = n.min(SAMPLE as u64) as usize;
         let soff = if n > 2 * SAMPLE as u64 { (n / 2 - SAMPLE as u64 / 2) & !63 } else { 0 };
         let s = self.read_stream(c, soff, sn)?;
-        // Schneller Vortest: bereits komprimiert?
+        // Quick pre-test: already compressed?
         let g = glz::compress(&s, 1, true).len();
         if opt.raw && g as f64 > sn as f64 * 0.99 {
             return Ok((CL_RAW, none));
@@ -594,7 +594,7 @@ impl<'a> Packer<'a> {
                 cls = CL_TEXTURE;
                 add(t);
             } else {
-                // Stride-Erkennung: die zwei Abstände mit der kleinsten Delta-Entropie
+                // Stride detection: the two distances with the smallest delta entropy
                 let en = sn.min(65536);
                 let (mut st, mut be) = ([1usize, 1], [1e300f64, 1e300]);
                 for k in 1..=64usize {
@@ -631,8 +631,8 @@ impl<'a> Packer<'a> {
                 }
             }
         }
-        // Viele Kandidaten: mit dem schnellen Schätzer die zwei aussichtsreichsten vorwählen;
-        // echt probekomprimiert (LZRC Stufe 2) werden nur "ohne Filter" und diese zwei.
+        // Many candidates: preselect the two most promising ones with the fast estimator; only
+        // "no filter" and these two are really trial-compressed (LZRC level 2).
         let mut tmp = vec![0u8; sn];
         if cand.len() > 3 {
             let mut est: Vec<(usize, usize)> = cand[1..]
@@ -692,20 +692,20 @@ fn plan_memory(opt: &mut Options) {
             opt.block /= 2;
         }
         if est_ram(opt, opt.threads, opt.block) > budget {
-            eprintln!("gpk: Warnung: --max-ram {:.1} GB ist auch mit 1 Thread und 4 MiB Blöcken nicht einhaltbar", opt.max_ram_gb);
+            eprintln!("gpk: warning: --max-ram {:.1} GB cannot be met even with 1 thread and 4 MiB blocks", opt.max_ram_gb);
         }
     }
     eprintln!(
-        "Speicherplanung: {} Threads, Blockgröße {} MiB, geschätzter Spitzen-RAM ~{:.0} MB{}",
+        "Memory plan: {} threads, block size {} MiB, estimated peak RAM ~{:.0} MB{}",
         opt.threads,
         opt.block >> 20,
         est_ram(opt, opt.threads, opt.block) / 1e6,
-        if opt.max_ram_gb > 0.0 { "" } else { " (begrenzen mit --max-ram GB)" }
+        if opt.max_ram_gb > 0.0 { "" } else { " (limit with --max-ram GB)" }
     );
 }
 
 fn put_str(ix: &mut Vec<u8>, s: &[u8]) -> Result<()> {
-    let l = u16::try_from(s.len()).map_err(|_| Error(format!("Pfad zu lang: {}", String::from_utf8_lossy(s))))?;
+    let l = u16::try_from(s.len()).map_err(|_| Error(format!("path too long: {}", String::from_utf8_lossy(s))))?;
     ix.extend_from_slice(&l.to_le_bytes());
     ix.extend_from_slice(s);
     Ok(())
@@ -716,7 +716,7 @@ fn write_fspec(ix: &mut Vec<u8>, f: &FSpec) {
     ix.extend_from_slice(&f.skip.to_le_bytes());
 }
 
-/// Geordneter Writer: fertige Blöcke gehen sofort in fester Reihenfolge ins Archiv.
+/// Ordered writer: finished blocks go into the archive immediately, in a fixed order.
 struct Writer {
     out: File,
     off: u64,
@@ -725,11 +725,11 @@ struct Writer {
     placed: Vec<(u64, u64, u8)>, // (off, csize, codec)
     err: Option<Error>,
     started: Vec<bool>,
-    /// Summe der Rohgrößen begonnener, noch nicht geschriebener Blöcke
+    /// Sum of the raw sizes of started blocks that have not been written yet
     held: u64,
 }
 
-/// Packt den Ordner `dir` nach `outpath`.
+/// Packs the directory `dir` into `outpath`.
 pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     let t0 = Instant::now();
     let mut opt = opt_in.clone();
@@ -739,8 +739,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     scan(dir, b"", &mut entries)?;
 
     let mut ph = Phases::new();
-    ph.mark("Scan");
-    // CRC aller Dateien (parallel)
+    ph.mark("scan");
+    // CRC of all files (parallel)
     let crcs = parallel_map(entries.len(), opt.threads, |i| {
         let e = &entries[i];
         if e.typ != E_FILE || e.size == 0 {
@@ -753,7 +753,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     }
 
     ph.mark("CRC");
-    // Deduplizieren
+    // Deduplicate
     let mut fi: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].typ == E_FILE && entries[i].size > 0).collect();
     fi.sort_by(|&a, &b| {
         let (x, y) = (&entries[a], &entries[b]);
@@ -791,10 +791,10 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         entries[ei].content = (contents.len() - 1) as u32;
     }
 
-    ph.mark("Dedup");
-    // Umwandlungen (PNG/JPEG), dann klassifizieren
+    ph.mark("dedup");
+    // Transformations (PNG/JPEG), then classify
     let mut spill_name = outpath.as_os_str().to_owned();
-    spill_name.push(".auslagerung.tmp");
+    spill_name.push(".spill.tmp");
     let mut pk = Packer { root: dir, opt, spill: Spill { path: PathBuf::from(spill_name), w: Mutex::new(None) }, spill_read: None };
     if opt.filter {
         let sizes: Vec<u64> = contents.iter().map(|c| c.size).collect();
@@ -809,7 +809,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     }
     let spilled = pk.spill.w.lock().unwrap().take().is_some();
     if spilled {
-        pk.spill_read = Some(File::open(&pk.spill.path).map_err(|e| io_err("Kann Auslagerungsdatei nicht lesen", &pk.spill.path, e))?);
+        pk.spill_read = Some(File::open(&pk.spill.path).map_err(|e| io_err("cannot read spill file", &pk.spill.path, e))?);
     }
     let (mut npng, mut njpg, mut png_bytes, mut jpg_bytes, mut jpg_after) = (0u32, 0u32, 0u64, 0u64, 0u64);
     for c in &contents {
@@ -832,8 +832,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         c.f = f;
     }
 
-    ph.mark("Klassifizieren");
-    // Sortieren
+    ph.mark("classify");
+    // Sort
     let mut order: Vec<usize> = (0..contents.len()).collect();
     if opt.sort {
         order.sort_by(|&a, &b| {
@@ -847,26 +847,26 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         });
     }
 
-    // Statistik
+    // Statistics
     let (mut cls_bytes, mut cls_files, mut filt_cnt) = ([0u64; CL_N], [0u32; CL_N], [0u32; FT_COUNT as usize]);
     for c in &contents {
         cls_bytes[c.cls] += c.size;
         cls_files[c.cls] += 1;
         filt_cnt[c.f.id as usize] += 1;
     }
-    eprintln!("Build: {} Einträge, {:.1} MB in Dateien", entries.len(), total as f64 / 1e6);
-    eprintln!("Deduplizierung: {dup_files} doppelte Dateien, {:.1} MB gespart", dup_bytes as f64 / 1e6);
+    eprintln!("Build: {} entries, {:.1} MB in files", entries.len(), total as f64 / 1e6);
+    eprintln!("Deduplication: {dup_files} duplicate files, {:.1} MB saved", dup_bytes as f64 / 1e6);
     for k in 0..CL_N {
         if cls_files[k] > 0 {
-            eprintln!("  {:<24} {:5} Dateien {:9.1} MB", CLASS_NAMES[k], cls_files[k], cls_bytes[k] as f64 / 1e6);
+            eprintln!("  {:<24} {:5} files {:9.1} MB", CLASS_NAMES[k], cls_files[k], cls_bytes[k] as f64 / 1e6);
         }
     }
     if npng > 0 {
-        eprintln!("PNG-Rekompression: {npng} Dateien ({:.1} MB) bitgenau umkehrbar", png_bytes as f64 / 1e6);
+        eprintln!("PNG recompression: {npng} files ({:.1} MB), bit-exact reversible", png_bytes as f64 / 1e6);
     }
     if njpg > 0 {
         eprintln!(
-            "JPEG-Rekompression: {njpg} Dateien, {:.1} -> {:.1} MB ({:.1} %), bitgenau umkehrbar",
+            "JPEG recompression: {njpg} files, {:.1} -> {:.1} MB ({:.1} %), bit-exact reversible",
             jpg_bytes as f64 / 1e6,
             jpg_after as f64 / 1e6,
             100.0 * (jpg_after as f64 / jpg_bytes as f64 - 1.0)
@@ -874,9 +874,9 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     }
     let filt: String =
         (0..FT_COUNT as usize).filter(|&k| filt_cnt[k] > 0).map(|k| format!(" {}={}", FILTER_NAMES[k], filt_cnt[k])).collect();
-    eprintln!("Filter:{filt}");
+    eprintln!("Filters:{filt}");
 
-    // Blöcke bilden
+    // Build blocks
     let mut blocks: Vec<Block> = Vec::new();
     for raw in [false, true] {
         let mut cur: Option<usize> = None;
@@ -886,7 +886,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             if (c.cls == CL_RAW) != raw {
                 continue;
             }
-            // Text mit Context-Mixing-Kern: kleinere Blöcke, damit das Entpacken parallel läuft
+            // Text with the context-mixing core: smaller blocks so that unpacking runs in parallel
             let cap = if opt.cm && opt.codec == CODEC_LZRC && c.cls == CL_TEXT && opt.block > TEXT_BLOCK { TEXT_BLOCK } else { opt.block };
             let mut off = 0u64;
             while off < c.ssize {
@@ -912,11 +912,11 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         }
     }
 
-    // Komprimieren (parallel) mit geordnetem, sofortigem Schreiben
-    let mut out = File::create(outpath).map_err(|e| io_err("Kann Archiv nicht schreiben", outpath, e))?;
-    out.write_all(&[0u8; HDR_SIZE]).map_err(|e| io_err("Schreibfehler", outpath, e))?;
+    // Compress (in parallel) with ordered, immediate writing
+    let mut out = File::create(outpath).map_err(|e| io_err("cannot write archive", outpath, e))?;
+    out.write_all(&[0u8; HDR_SIZE]).map_err(|e| io_err("write error", outpath, e))?;
     let nb = blocks.len();
-    // Speicherbudget für fertige, noch nicht geschriebene Blöcke (wie in est_ram)
+    // Memory budget for finished blocks that are not written yet (as in est_ram)
     let budget = (opt.threads.max(1) as u64 + 1) * opt.block;
     let writer = Mutex::new(Writer {
         out,
@@ -930,12 +930,12 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     });
     let cv = Condvar::new();
     let failed = AtomicBool::new(false);
-    // Geschätzter Aufwand je Block: gespeicherte Blöcke kosten fast nichts
+    // Estimated effort per block: stored blocks cost almost nothing
     let cost: Vec<u64> = blocks.iter().map(|b| if b.codec == CODEC_STORED { b.usize / 64 } else { b.usize }).collect();
     let worker = || loop {
-        // Teuersten noch nicht begonnenen Block wählen, solange die begonnenen, noch nicht
-        // geschriebenen Blöcke ins Speicherbudget passen. Der nächste zu schreibende Block
-        // ist immer erlaubt, daher kein Stillstand.
+        // Pick the most expensive block not started yet, as long as the started but unwritten
+        // blocks fit into the memory budget. The next block to write is always allowed,
+        // so there is no deadlock.
         let bi = {
             let mut w = writer.lock().unwrap();
             loop {
@@ -980,8 +980,8 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
                     pr.pb = 0;
                 }
                 if opt.cm && text * 2 > b.usize {
-                    // Text: Context-Mixing-Kern. LZRC (teuer) nur zusätzlich probieren, wenn die
-                    // schnelle Schätzung ihm überhaupt eine Chance gibt (auf Text fast nie).
+                    // Text: context-mixing core. Only also try LZRC (expensive) if the fast
+                    // estimate gives it any chance at all (almost never on text).
                     let t = tcm::compress(&buf);
                     if (lzrc::estimate(&buf) as f64) < t.len() as f64 * 1.25 {
                         let lz = lzrc::compress(&buf, &pr);
@@ -1006,7 +1006,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         })();
         if ph.on {
             eprintln!(
-                "[Zeit] Block {:3}: {:6.1} MB  {:6.1} s .. {:6.1} s",
+                "[time] block {:3}: {:6.1} MB  {:6.1} s .. {:6.1} s",
                 bi + 1,
                 blocks[bi].usize as f64 / 1e6,
                 t_start,
@@ -1018,20 +1018,20 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             Ok((codec, data)) => {
                 let b = &blocks[bi];
                 let name = match codec {
-                    CODEC_STORED => "gespeichert",
+                    CODEC_STORED => "stored",
                     CODEC_LZRC => "LZRC",
-                    CODEC_TCM => "Text-CM",
+                    CODEC_TCM => "text CM",
                     _ => "xz",
                 };
-                eprintln!("  Block {:3}/{}: {:7.1} MB -> {:7.1} MB  ({})", bi + 1, nb, b.usize as f64 / 1e6, data.len() as f64 / 1e6, name);
+                eprintln!("  block {:3}/{}: {:7.1} MB -> {:7.1} MB  ({})", bi + 1, nb, b.usize as f64 / 1e6, data.len() as f64 / 1e6, name);
                 w.pending[bi] = Some((codec, data));
-                // alle lückenlos fertigen Blöcke schreiben und freigeben
+                // write and release all blocks that are finished without gaps
                 while w.next < nb && w.pending[w.next].is_some() {
                     let i = w.next;
                     let (codec, data) = w.pending[i].take().unwrap();
                     let off = w.off;
                     if let Err(e) = w.out.write_all(&data) {
-                        w.err = Some(io_err("Schreibfehler (Platte voll?)", outpath, e));
+                        w.err = Some(io_err("write error (disk full?)", outpath, e));
                         failed.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -1060,7 +1060,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         return Err(e);
     }
     if w.next != nb {
-        return err("interner Fehler: nicht alle Blöcke geschrieben");
+        return err("internal error: not all blocks written");
     }
     for (b, &(off, csize, codec)) in blocks.iter_mut().zip(&w.placed) {
         b.off = off;
@@ -1073,7 +1073,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     }
     let data_end = w.off;
 
-    ph.mark("Komprimieren");
+    ph.mark("compress");
     // Index
     let mut ix = Vec::new();
     ix.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -1116,19 +1116,19 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
         icodec = CODEC_STORED;
     }
     let mut out = w.out;
-    out.write_all(&ic).map_err(|e| io_err("Schreibfehler", outpath, e))?;
+    out.write_all(&ic).map_err(|e| io_err("write error", outpath, e))?;
     let mut hdr = [0u8; HDR_SIZE];
     hdr[..4].copy_from_slice(b"GPK1");
     hdr[4..12].copy_from_slice(&data_end.to_le_bytes());
     hdr[12..20].copy_from_slice(&(ic.len() as u64).to_le_bytes());
     hdr[20..28].copy_from_slice(&(ix.len() as u64).to_le_bytes());
     hdr[28] = icodec;
-    write_at(&out, &hdr, 0).map_err(|e| io_err("Schreibfehler", outpath, e))?;
+    write_at(&out, &hdr, 0).map_err(|e| io_err("write error", outpath, e))?;
     out.sync_all().ok();
     let arch = data_end + ic.len() as u64;
     let dt = t0.elapsed().as_secs_f64();
     eprintln!(
-        "Archiv: {:.2} MB (Rate {:.3}, {:.1}% des Builds), Index {:.1} KB, {:.1} s ({:.1} MB/s)",
+        "Archive: {:.2} MB (ratio {:.3}, {:.1}% of the build), index {:.1} KB, {:.1} s ({:.1} MB/s)",
         arch as f64 / 1e6,
         total as f64 / arch as f64,
         100.0 * arch as f64 / total as f64,
@@ -1150,7 +1150,7 @@ fn xz_compress(buf: &[u8]) -> Result<Option<Vec<u8>>> {
 }
 #[cfg(not(feature = "xz"))]
 fn xz_compress(_: &[u8]) -> Result<Option<Vec<u8>>> {
-    err("--xz ist in diesem Build nicht verfügbar (ohne liblzma gebaut)")
+    err("--xz is not available in this build (built without liblzma; use --features xz)")
 }
 #[cfg(feature = "xz")]
 fn xz_decompress(src: &[u8], out: &mut [u8]) -> bool {
@@ -1170,7 +1170,7 @@ fn xz_decompress(_: &[u8], _: &mut [u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Archiv lesen
+// Reading archives
 // ---------------------------------------------------------------------------
 struct Archive {
     path: PathBuf,
@@ -1186,7 +1186,7 @@ struct Rd<'a> {
 impl<'a> Rd<'a> {
     fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.d.len() - self.p < n {
-            return err("Index beschädigt");
+            return err("index corrupted");
         }
         self.p += n;
         Ok(&self.d[self.p - n..self.p])
@@ -1209,7 +1209,7 @@ impl<'a> Rd<'a> {
     }
 }
 
-/// Pfad aus dem Archiv sicher? (relativ, keine '..'/'.'-Komponenten, unter Windows kein '\' oder ':')
+/// Is a path from the archive safe? (relative, no '..'/'.' components, on Windows no '\' or ':')
 fn safe_path(p: &[u8]) -> bool {
     if p.is_empty() || p[0] == b'/' || p.contains(&0) {
         return false;
@@ -1221,31 +1221,31 @@ fn safe_path(p: &[u8]) -> bool {
 }
 
 fn load_archive(path: &Path) -> Result<Archive> {
-    let f = File::open(path).map_err(|e| io_err("Kann Archiv nicht öffnen", path, e))?;
-    let size = f.metadata().map_err(|e| io_err("Kann Archiv nicht öffnen", path, e))?.len();
+    let f = File::open(path).map_err(|e| io_err("cannot open archive", path, e))?;
+    let size = f.metadata().map_err(|e| io_err("cannot open archive", path, e))?.len();
     let mut hdr = [0u8; HDR_SIZE];
     if size < HDR_SIZE as u64 || read_at(&f, &mut hdr, 0).is_err() || &hdr[..4] != b"GPK1" {
-        return err(format!("Kein GPK-Archiv: {}", path.display()));
+        return err(format!("not a GPK archive: {}", path.display()));
     }
     let ioff = u64::from_le_bytes(hdr[4..12].try_into().unwrap());
     let ics = u64::from_le_bytes(hdr[12..20].try_into().unwrap());
     let ius = u64::from_le_bytes(hdr[20..28].try_into().unwrap());
     let icodec = hdr[28];
     if ioff > size || ics > size - ioff || ius > (1 << 32) || ics > (1 << 32) {
-        return err("Index beschädigt");
+        return err("index corrupted");
     }
     let mut ic = vec![0u8; ics as usize];
-    read_at(&f, &mut ic, ioff).map_err(|_| Error("Index nicht lesbar".into()))?;
+    read_at(&f, &mut ic, ioff).map_err(|_| Error("index not readable".into()))?;
     let mut ix = vec![0u8; ius as usize];
     match icodec {
         CODEC_STORED if ics == ius => ix.copy_from_slice(&ic),
-        CODEC_LZRC => lzrc::decompress(&ic, &mut ix).ok_or_else(|| Error("Index beschädigt".into()))?,
-        _ => return err("Index beschädigt"),
+        CODEC_LZRC => lzrc::decompress(&ic, &mut ix).ok_or_else(|| Error("index corrupted".into()))?,
+        _ => return err("index corrupted"),
     }
     let mut r = Rd { d: &ix, p: 0 };
     let ne = r.u32()? as u64;
     if ne > ius {
-        return err("Index beschädigt");
+        return err("index corrupted");
     }
     let mut entries = Vec::with_capacity(ne as usize);
     for _ in 0..ne {
@@ -1258,13 +1258,13 @@ fn load_archive(path: &Path) -> Result<Archive> {
             e.link = r.str()?;
         }
         if e.typ > E_LINK || !safe_path(&e.path) {
-            return err(format!("Unsicherer Pfad im Archiv: {}", String::from_utf8_lossy(&e.path)));
+            return err(format!("unsafe path in archive: {}", String::from_utf8_lossy(&e.path)));
         }
         entries.push(e);
     }
     let nc = r.u32()? as u64;
     if nc > ius {
-        return err("Index beschädigt");
+        return err("index corrupted");
     }
     let mut contents = Vec::with_capacity(nc as usize);
     for _ in 0..nc {
@@ -1284,39 +1284,39 @@ fn load_archive(path: &Path) -> Result<Archive> {
             || (c.xform == XF_NONE && c.ssize != c.size)
             || (c.xform != XF_NONE && c.ssize > MAX_XFORM_SSIZE)
         {
-            return err("Index beschädigt");
+            return err("index corrupted");
         }
         contents.push(c);
     }
     let nb = r.u32()? as u64;
     if nb > ius {
-        return err("Index beschädigt");
+        return err("index corrupted");
     }
     let mut blocks = Vec::with_capacity(nb as usize);
     for _ in 0..nb {
         let mut b = Block { off: r.u64()?, csize: r.u64()?, usize: r.u64()?, codec: r.u8()?, ..Default::default() };
         let np = r.u32()? as u64;
         if np > ius || b.off > size || b.csize > size - b.off || b.usize > (1 << 31) {
-            return err("Index beschädigt");
+            return err("index corrupted");
         }
         let mut sum = 0u64;
         for _ in 0..np {
             let p = Piece { content: r.u32()?, off: r.u64()?, len: r.u32()? };
-            let c = contents.get(p.content as usize).ok_or_else(|| Error("Index beschädigt".into()))?;
+            let c = contents.get(p.content as usize).ok_or_else(|| Error("index corrupted".into()))?;
             if p.off > c.ssize || p.len as u64 > c.ssize - p.off || (c.xform != XF_NONE && (p.off != 0 || p.len as u64 != c.ssize)) {
-                return err("Index beschädigt");
+                return err("index corrupted");
             }
             sum += p.len as u64;
             b.pieces.push(p);
         }
         if sum != b.usize {
-            return err("Index beschädigt");
+            return err("index corrupted");
         }
         blocks.push(b);
     }
     for e in &entries {
         if e.typ == E_FILE && e.size > 0 && contents.get(e.content as usize).is_none_or(|c| c.size != e.size) {
-            return err("Index beschädigt");
+            return err("index corrupted");
         }
     }
     Ok(Archive { path: path.to_path_buf(), entries, contents, blocks })
@@ -1328,35 +1328,35 @@ fn crc32_combine(a: u32, b: u32, len_b: u64) -> u32 {
     ha.finalize()
 }
 
-/// Entpackt `archive` nach `outdir` (parallel, CRC-geprüft).
+/// Unpacks `archive` into `outdir` (in parallel, CRC-checked).
 pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
     let t0 = Instant::now();
     let a = load_archive(archive)?;
     if !cfg!(feature = "xz") && a.blocks.iter().any(|b| b.codec == CODEC_XZ) {
-        return err("Archiv wurde mit --xz gepackt; dieses Programm ist ohne xz gebaut (cargo build --release --features xz)");
+        return err("archive was packed with --xz; this program was built without xz (cargo build --release --features xz)");
     }
-    fs::create_dir_all(outdir).map_err(|e| io_err("Kann Ordner nicht anlegen", outdir, e))?;
+    fs::create_dir_all(outdir).map_err(|e| io_err("cannot create directory", outdir, e))?;
     let mut targets: Vec<Vec<usize>> = vec![Vec::new(); a.contents.len()];
     for (i, e) in a.entries.iter().enumerate() {
         let f = path_from_bytes(outdir, &e.path)?;
         if let Some(parent) = f.parent() {
-            fs::create_dir_all(parent).map_err(|er| io_err("Kann Ordner nicht anlegen", parent, er))?;
+            fs::create_dir_all(parent).map_err(|er| io_err("cannot create directory", parent, er))?;
         }
         match e.typ {
-            E_DIR => fs::create_dir_all(&f).map_err(|er| io_err("Kann Ordner nicht anlegen", &f, er))?,
+            E_DIR => fs::create_dir_all(&f).map_err(|er| io_err("cannot create directory", &f, er))?,
             E_LINK => {}
             _ => {
-                let file = File::create(&f).map_err(|er| io_err("Kann Datei nicht anlegen", &f, er))?;
+                let file = File::create(&f).map_err(|er| io_err("cannot create file", &f, er))?;
                 if e.size > 0 {
-                    file.set_len(e.size).map_err(|er| io_err("Kann Dateigröße nicht setzen", &f, er))?;
+                    file.set_len(e.size).map_err(|er| io_err("cannot set file size", &f, er))?;
                     targets[e.content as usize].push(i);
                 }
             }
         }
     }
     let failed = AtomicBool::new(false);
-    let zeiten = std::env::var_os("GPK_ZEITEN").is_some();
-    // Geschätzter Entpackaufwand je Block: Text-CM ~40x LZRC, Bild-Rückwandlung teuer, Gespeichertes billig
+    let timings = std::env::var_os("GPK_TIMINGS").is_some();
+    // Estimated unpacking effort per block: text CM ~40x LZRC, image inverse expensive, stored cheap
     let cost: Vec<u64> = a
         .blocks
         .iter()
@@ -1380,7 +1380,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         let mut src = vec![0u8; b.csize as usize];
         let ok = File::open(&a.path).and_then(|f| read_at(&f, &mut src, b.off)).is_ok();
         if !ok {
-            fail(format!("Block {bi} nicht lesbar"));
+            fail(format!("block {bi} not readable"));
             return crcs;
         }
         let mut buf = vec![0u8; b.usize as usize];
@@ -1403,7 +1403,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         };
         drop(src);
         if !ok {
-            fail(format!("Block {bi} beschädigt"));
+            fail(format!("block {bi} corrupted"));
             return crcs;
         }
         let t_dec = tb.elapsed().as_secs_f64();
@@ -1417,7 +1417,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
                 let mut orig = vec![0u8; c.size as usize];
                 let okx = if c.xform == XF_PNG { pngx::inverse(&tmp, &mut orig) } else { jpgx::inverse(&tmp, &mut orig) };
                 if !okx {
-                    fail(format!("Umwandlung in Block {bi} beschädigt"));
+                    fail(format!("transformation in block {bi} corrupted"));
                     continue;
                 }
                 (orig, 0)
@@ -1431,14 +1431,14 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
                     .and_then(|f| fs::OpenOptions::new().write(true).open(f))
                     .and_then(|f| write_at(&f, &data, woff));
                 if let Err(e) = res {
-                    fail(format!("Schreibfehler: {e}"));
+                    fail(format!("write error: {e}"));
                 }
             }
         }
-        if zeiten {
-            let codec = ["gespeichert", "LZRC", "xz", "Text-CM"].get(b.codec as usize).unwrap_or(&"?");
+        if timings {
+            let codec = ["stored", "LZRC", "xz", "text CM"].get(b.codec as usize).unwrap_or(&"?");
             eprintln!(
-                "[Zeit] Block {:3}: {:6.1} MB {:<11} dekodieren {:5.2} s, Rest {:5.2} s",
+                "[time] block {:3}: {:6.1} MB {:<11} decode {:5.2} s, rest {:5.2} s",
                 bi + 1,
                 b.usize as f64 / 1e6,
                 codec,
@@ -1449,7 +1449,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         crcs
     });
 
-    // CRC je Datei aus den Stück-CRCs kombinieren und prüfen
+    // Combine the per-file CRC from the piece CRCs and check it
     let mut crc = vec![0u32; a.contents.len()];
     for (b, pc) in a.blocks.iter().zip(&piece_crc) {
         for (p, &pcrc) in b.pieces.iter().zip(pc) {
@@ -1459,21 +1459,21 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         }
     }
     let bad = a.contents.iter().zip(&crc).filter(|(c, &k)| c.crc != k).count();
-    // Symlinks, Rechte, Zeitstempel
+    // Symlinks, permissions, timestamps
     for e in &a.entries {
         let f = path_from_bytes(outdir, &e.path)?;
         if e.typ == E_LINK {
             if e.link.first() == Some(&b'/') {
-                eprintln!("gpk: absoluter Symlink übersprungen: {}", String::from_utf8_lossy(&e.path));
+                eprintln!("gpk: absolute symlink skipped: {}", String::from_utf8_lossy(&e.path));
                 continue;
             }
             let _ = fs::remove_file(&f);
             if make_symlink(&e.link, &f).is_err() {
-                eprintln!("gpk: Symlink nicht angelegt (auf diesem System nicht unterstützt?): {}", String::from_utf8_lossy(&e.path));
+                eprintln!("gpk: symlink not created (not supported on this system?): {}", String::from_utf8_lossy(&e.path));
             }
             continue;
         }
-        // Zeitstempel vor den Rechten setzen: danach kann die Datei schreibgeschützt sein
+        // Set the timestamp before the permissions: afterwards the file may be read-only
         if e.typ == E_FILE {
             set_mtime(&f, e.mtime);
         }
@@ -1482,10 +1482,10 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
     let dt = t0.elapsed().as_secs_f64();
     let total: u64 = a.entries.iter().filter(|e| e.typ == E_FILE).map(|e| e.size).sum();
     if bad > 0 || failed.load(Ordering::Relaxed) {
-        return err(format!("FEHLER – {bad} Dateien mit falscher Prüfsumme"));
+        return err(format!("ERROR – {bad} files with a wrong checksum"));
     }
     eprintln!(
-        "Entpackt: {} Einträge, {:.1} MB in {:.2} s ({:.1} MB/s), alle CRCs OK",
+        "Unpacked: {} entries, {:.1} MB in {:.2} s ({:.1} MB/s), all CRCs OK",
         a.entries.len(),
         total as f64 / 1e6,
         dt,
@@ -1494,7 +1494,7 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
     Ok(())
 }
 
-/// Änderungszeit setzen (Sekunden seit 1970, auch negativ).
+/// Set the modification time (seconds since 1970, may be negative).
 fn set_mtime(p: &Path, secs: i64) {
     let d = std::time::Duration::from_secs(secs.unsigned_abs());
     let t = if secs >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) };
@@ -1520,7 +1520,7 @@ fn set_mode(p: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_mode(_: &Path, _: u32) {}
 
-/// Inhalt auflisten (Ausgabe wie die C-Version).
+/// List the contents (same output layout as the C version).
 pub fn list(archive: &Path) -> Result<()> {
     let a = load_archive(archive)?;
     let mut so = io::stdout().lock();
@@ -1533,7 +1533,7 @@ pub fn list(archive: &Path) -> Result<()> {
     let csum: u64 = a.blocks.iter().map(|b| b.csize).sum();
     let _ = writeln!(
         so,
-        "{} Einträge, {} eindeutige Inhalte, {} Blöcke, Blockdaten {:.2} MB",
+        "{} entries, {} unique contents, {} blocks, block data {:.2} MB",
         a.entries.len(),
         a.contents.len(),
         a.blocks.len(),
@@ -1546,16 +1546,16 @@ pub fn list(archive: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn sichere_pfade() {
+    fn safe_paths() {
         assert!(safe_path(b"a/b/c.txt"));
         for bad in [&b""[..], b"/etc/passwd", b"a/../b", b"..", b"a//b", b"./a", b"a/.", b"a\0b"] {
             assert!(!safe_path(bad), "{:?}", bad);
         }
     }
     #[test]
-    fn crc_kombination() {
-        let (a, b) = (b"Hallo ".as_slice(), b"Welt".as_slice());
-        let whole = crc32fast::hash(b"Hallo Welt");
+    fn crc_combination() {
+        let (a, b) = (b"Hello ".as_slice(), b"World".as_slice());
+        let whole = crc32fast::hash(b"Hello World");
         assert_eq!(crc32_combine(crc32fast::hash(a), crc32fast::hash(b), b.len() as u64), whole);
         assert_eq!(crc32_combine(0, crc32fast::hash(a), a.len() as u64), crc32fast::hash(a));
     }

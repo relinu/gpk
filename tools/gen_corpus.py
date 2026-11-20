@@ -1,4 +1,4 @@
-"""Erzeugt einen deterministischen Testkorpus typischer Spiel-Assets."""
+"""Creates a deterministic test corpus of typical game assets."""
 import json
 import os
 import struct
@@ -12,7 +12,7 @@ rng = np.random.default_rng(1234)
 
 
 def fractal_noise(h, w, octaves=6, persistence=0.5, base=8):
-    """Mehroktaviges Value-Noise (bilinear interpoliert), Werte ~[0,1]."""
+    """Multi-octave value noise (bilinearly interpolated), values ~[0,1]."""
     out = np.zeros((h, w))
     amp, total = 1.0, 0.0
     for o in range(octaves):
@@ -35,10 +35,10 @@ def save(name, data):
     path = os.path.join(OUT, name)
     with open(path, "wb") as f:
         f.write(data if isinstance(data, (bytes, bytearray)) else data.tobytes())
-    print(f"{name:24s} {os.path.getsize(path):>10,d} Bytes")
+    print(f"{name:24s} {os.path.getsize(path):>10,d} bytes")
 
 
-# 1) Albedo-Textur RGBA8 1024x1024: Steinmauer mit Fugen, Farbrauschen, Alpha meist 255
+# 1) Albedo texture RGBA8 1024x1024: stone wall with joints, color noise, alpha mostly 255
 H = W = 1024
 n = fractal_noise(H, W, octaves=7)
 yy, xx = np.mgrid[0:H, 0:W]
@@ -52,22 +52,22 @@ col[mortar] = np.array([0.55, 0.55, 0.52]) * (0.8 + 0.4 * n[mortar, None])
 col += rng.normal(0, 0.012, col.shape)
 rgb = (col.clip(0, 1) * 255).astype(np.uint8)
 alpha = np.full((H, W, 1), 255, np.uint8)
-alpha[fractal_noise(H, W, octaves=3) > 0.72] = 0           # ein paar Löcher (Cutout)
+alpha[fractal_noise(H, W, octaves=3) > 0.72] = 0           # a few holes (cutout)
 save("texture_rgba8.raw", np.concatenate([rgb, alpha], axis=2))
 
-# 2) Heightmap uint16 1024x1024 (Terrain)
+# 2) Height map uint16 1024x1024 (terrain)
 hm = fractal_noise(1024, 1024, octaves=8, persistence=0.55, base=4)
 hm16 = (hm * 65535).clip(0, 65535).astype("<u2")
 save("heightmap_u16.raw", hm16)
 
-# 3) Normal Map RGB8 512x512 aus Heightmap
+# 3) Normal map RGB8 512x512 from the height map
 h2 = hm[::2, ::2] * 40
 gy, gx = np.gradient(h2)
 nrm = np.stack([-gx, -gy, np.ones_like(gx)], axis=-1)
 nrm /= np.linalg.norm(nrm, axis=-1, keepdims=True)
 save("normalmap_rgb8.raw", ((nrm * 0.5 + 0.5) * 255).round().astype(np.uint8))
 
-# 4) Mesh: Terrain-Gitter 320x320, Vertex = pos(3f) normal(3f) uv(2f) = 32 Byte
+# 4) Mesh: terrain grid 320x320, vertex = pos(3f) normal(3f) uv(2f) = 32 bytes
 G = 320
 hs = hm[:: 1024 // G, :: 1024 // G][:G, :G] * 120.0
 gz, gx2 = np.mgrid[0:G, 0:G].astype(np.float32)
@@ -78,8 +78,8 @@ nn /= np.linalg.norm(nn, axis=-1, keepdims=True)
 uv = np.stack([gx2 / (G - 1), gz / (G - 1)], -1)
 verts = np.concatenate([pos, nn.astype(np.float32), uv], -1).astype("<f4")
 save("mesh_vertices.bin", verts)
-# Wie nach einer Vertex-Cache-Optimierung: 8x8-Quad-Kacheln in zufälliger Reihenfolge,
-# Dreiecke innerhalb einer Kachel teilweise umsortiert und Windungen rotiert.
+# As after a vertex cache optimization: 8x8 quad tiles in random order,
+# triangles within a tile partially reordered and windings rotated.
 q = np.arange(G * G, dtype=np.uint32).reshape(G, G)[:-1, :-1]
 tris = []
 tiles = [(ty, tx) for ty in range(0, G - 1, 8) for tx in range(0, G - 1, 8)]
@@ -96,7 +96,7 @@ for ti in rng.permutation(len(tiles)):
 idx = np.concatenate(tris).astype("<u4")
 save("mesh_indices_u32.bin", idx)
 
-# 5) Audio PCM 16-bit Stereo 44.1 kHz, 10 s: Akkorde mit Obertönen, Hüllkurve, leichtes Rauschen
+# 5) Audio PCM 16-bit stereo 44.1 kHz, 10 s: chords with overtones, envelope, slight noise
 sr, dur = 44100, 10.0
 t = np.arange(int(sr * dur)) / sr
 sig = np.zeros_like(t)
@@ -112,14 +112,14 @@ right = np.roll(sig, 300) * 0.9
 pcm = (np.stack([left, right], -1).clip(-1, 1) * 32767).astype("<i2")
 save("audio_pcm16_stereo.raw", pcm)
 
-# 6) Level-Tilemap 1024x1024 uint8: Räume, Gänge, Wände, Deko
-tm = np.full((1024, 1024), 1, np.uint8)            # 1 = Fels
+# 6) Level tile map 1024x1024 uint8: rooms, corridors, walls, decoration
+tm = np.full((1024, 1024), 1, np.uint8)            # 1 = rock
 for _ in range(900):
     rh, rw = rng.integers(6, 30, 2)
     ry, rx = rng.integers(0, 1024 - rh), rng.integers(0, 1024 - rw)
-    tm[ry:ry + rh, rx:rx + rw] = 2                  # Wand
-    tm[ry + 1:ry + rh - 1, rx + 1:rx + rw - 1] = rng.choice([10, 11, 12])   # Bodentyp
-for _ in range(1500):                               # Gänge
+    tm[ry:ry + rh, rx:rx + rw] = 2                  # wall
+    tm[ry + 1:ry + rh - 1, rx + 1:rx + rw - 1] = rng.choice([10, 11, 12])   # floor type
+for _ in range(1500):                               # corridors
     y, x = rng.integers(0, 1024, 2)
     L = rng.integers(10, 80)
     if rng.random() < 0.5: tm[y, x:x + L] = 20
@@ -128,7 +128,8 @@ deco = rng.random(tm.shape) < 0.01
 tm[deco & (tm >= 10)] = rng.integers(30, 60, deco.sum())[: (deco & (tm >= 10)).sum()]
 save("level_tilemap_u8.bin", tm)
 
-# 7) Lokalisierung / Dialoge als JSON (Text)
+# 7) Localization / dialogs as JSON (text). The German word list is intentional:
+#    it simulates the German localization file of a game (sample content, not project text).
 words = ("der die das und ist nicht ein eine Schwert Schild Drache Burg König Königin Held Quest "
          "Gold Trank Heilung Magie Feuer Eis Wald Höhle Dorf Händler kaufen verkaufen gehen kommen "
          "sehen finden kämpfen Gefahr Schatz Karte Norden Süden Osten Westen schnell langsam alt neu "
@@ -143,7 +144,7 @@ for i in range(9000):
     }
 save("dialog_de.json", json.dumps(entries, ensure_ascii=False, indent=1).encode("utf-8"))
 
-# 8) Spielstand: Array von Entity-Structs (64 Byte)
+# 8) Save game: array of entity structs (64 bytes)
 recs = bytearray()
 for i in range(16000):
     etype = int(rng.choice([1, 1, 1, 2, 2, 3, 7]))
@@ -155,5 +156,5 @@ for i in range(16000):
                         *[int(v) for v in (rng.integers(0, 40, 8) * (rng.random(8) < 0.3))])
 save("savegame_entities.bin", bytes(recs))
 
-# 9) Bereits komprimierte Daten (z. B. Ogg/JPEG im Paket) – sollte roh gespeichert werden
+# 9) Already compressed data (e.g. Ogg/JPEG in a package) – should be stored raw
 save("precompressed_blob.bin", rng.integers(0, 256, 1 << 20, dtype=np.uint8))

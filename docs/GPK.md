@@ -1,180 +1,177 @@
-# GPK – Download-Packer für Spiel-Builds
+# GPK – download packer for game builds
 
-GPK nimmt einen fertigen Spiel-Build (Ordner) und erzeugt ein Archiv für den
-Download. Ziel: möglichst kleine Downloads, bitgenaue Wiederherstellung
-(CRC32 je Datei), paralleles Entpacken.
+GPK takes a finished game build (a directory) and creates an archive for download.
+Goals: downloads as small as possible, bit-exact restoration (CRC32 per file), parallel
+unpacking.
 
 ```bash
-cargo build --release                  # baut target/release/gpk
-gpk c -t 4 <build-ordner> spiel.gpk    # packen
-gpk x -t 4 spiel.gpk <ziel>            # entpacken (prüft alle CRCs)
-gpk l spiel.gpk                        # Inhalt und gewählte Filter anzeigen
-cargo test --release --features cref   # Tests + Differenztests gegen die C-Referenz
+cargo build --release                     # builds target/release/gpk
+gpk c -t 4 <build-dir> game.gpk           # pack
+gpk x -t 4 game.gpk <target>              # unpack (checks all CRCs)
+gpk l game.gpk                            # show contents and chosen filters
+cargo test --release --features cref,xz   # tests + differential tests against the C reference
 ```
 
-## Speicherbedarf
+## Memory usage
 
-Der RAM-Bedarf hängt **nicht** von der Build-Größe ab:
+The RAM requirement does **not** depend on the build size:
 
-- Fertige Blöcke werden sofort ins Archiv geschrieben, in fester Reihenfolge
-  (Archive sind bei gleicher Eingabe bytegleich, unabhängig von der Threadzahl).
-  Die teuersten Blöcke werden zuerst begonnen, solange die begonnenen, noch nicht
-  geschriebenen Blöcke zusammen höchstens `(Threads + 1) × Blockgröße` umfassen.
-- Dateien werden nur bereichsweise gelesen, jeweils für den aktuellen Arbeitsschritt.
-- Umgewandelte PNG-/JPEG-Daten werden in `<archiv>.auslagerung.tmp` neben dem Archiv
-  ausgelagert und am Ende gelöscht.
-- Beim Entpacken liest jeder Thread nur den Block, den er gerade entpackt. Für Textblöcke
-  behält jeder Thread die Tabellen des Text-Kerns (~125 MB) und setzt sie nur zurück,
-  statt sie für jeden Block neu anzufordern.
+- Finished blocks are written to the archive immediately, in a fixed order (the same input
+  always gives byte-identical archives, independent of the number of threads). The most
+  expensive blocks are started first, as long as the started but unwritten blocks together
+  take at most `(threads + 1) × block size`.
+- Files are only read range by range, each time for the current processing step.
+- Transformed PNG/JPEG data is spilled to `<archive>.spill.tmp` next to the archive and
+  deleted at the end.
+- When unpacking, each thread only reads the block it is currently unpacking. For text blocks
+  each thread keeps the tables of the text core (~125 MB) and only resets them instead of
+  allocating them again for every block.
 
-| Build | Packen (4 Threads) | Entpacken (4 Threads) |
+| Build | Pack (4 threads) | Unpack (4 threads) |
 |---:|---:|---:|
-| 2,9 GB | 2,4 GB RAM (vorher 6,3 GB) | – |
-| 5,6 GB | 2,7 GB RAM | 0,5 GB RAM (vorher 6,1 GB) |
-| 15,4 GB | 2,3 GB RAM | 0,5 GB RAM |
+| 2.9 GB | 2.4 GB RAM (before: 6.3 GB) | – |
+| 5.6 GB | 2.7 GB RAM | 0.5 GB RAM (before: 6.1 GB) |
+| 15.4 GB | 2.3 GB RAM | 0.5 GB RAM |
 
-(Gemessen mit der C-Version. Die Rust-Version braucht beim Entpacken mit Textblöcken
-bis zu ~0,65 GB, weil jeder Thread die Text-Kern-Tabellen behält.)
+(Measured with the C version. When unpacking text blocks, the Rust version needs up to
+~0.65 GB because each thread keeps the text core tables.)
 
-Faustregel beim Packen: etwa 11 × Blockgröße je Thread (LZRC-Binärbaum + Puffer).
-Mit `--max-ram GB` wählt GPK Threads und notfalls kleinere Blöcke passend zum Budget,
-z. B. `--max-ram 1` → 1 Thread, gemessen 0,7 GB. Weniger Threads oder kleinere Blöcke
-machen das Packen langsamer bzw. das Archiv etwas größer.
+Rule of thumb for packing: about 11 × block size per thread (LZRC binary tree + buffers).
+With `--max-ram GB`, GPK chooses the number of threads and, if necessary, smaller blocks to fit
+the budget, e.g. `--max-ram 1` → 1 thread, measured 0.7 GB. Fewer threads or smaller blocks
+make packing slower or the archive slightly larger.
 
 ## Pipeline
 
-1. **Scannen**: Dateien, Ordner, Symlinks, Rechte (z. B. Ausführbar-Bit), Zeitstempel
-2. **Deduplizieren**: identische Dateien nur einmal (CRC32 + Größe + Bytevergleich)
-3. **Umwandeln** (immer vor der Übernahme vollständig rekonstruiert und verglichen):
-   - **PNG**: IDAT-Deflate-Strom entpacken, wenn zlib ihn bitgenau reproduzieren kann
-     (Precomp/Preflate-Prinzip). Entpacken und Nachkomprimieren macht eine eigene
-     Implementierung (`src/inflate.rs`, `src/deflate.rs`), die bitgenau wie zlib 1.4 arbeitet;
-     die Suche über Stufe, memLevel und Strategie vergleicht laufend und bricht beim ersten
-     abweichenden Block ab (das zlib-Kopfbyte verrät zudem die Stufenklasse). Danach je Bild das Kleinere von zwei Varianten:
-     Rohdaten für LZRC oder **Pixel-Coder PXC** (Zeilenfilter entfernen, gewichtete
-     Mischung von 6 Prädiktoren, optionale Farbtransformation, Kontext-Arithmetikkodierung)
-   - **JPEG** (`src/jpgx.rs`): Baseline/Extended mit Huffman, 1–4 Komponenten, beliebige
-     Abtastung, Restart-Marker. Scan zu DCT-Koeffizienten dekodieren, mit Kontextmodell
-     (Nachbarblöcke) neu kodieren, beim Entpacken Huffman-Strom exakt neu erzeugen.
-     Progressive/arithmetische JPEGs bleiben unverändert.
-4. **Klassifizieren & Filter wählen** je Datei, per Probekompression mit dem LZRC-Kern:
-   | Filter | für | Wirkung |
+1. **Scan**: files, directories, symlinks, permissions (e.g. the executable bit), timestamps
+2. **Deduplicate**: identical files only once (CRC32 + size + byte comparison)
+3. **Transform** (always fully reconstructed and compared before it is accepted):
+   - **PNG**: inflate the IDAT Deflate stream if zlib can reproduce it bit-exactly
+     (Precomp/Preflate principle). Inflating and recompressing is done by an own
+     implementation (`src/inflate.rs`, `src/deflate.rs`) that works bit-exactly like zlib 1.4;
+     the search over level, memLevel and strategy compares continuously and stops at the first
+     differing block (the zlib header byte also reveals the level class). Then, per image, the
+     smaller of two variants: raw data for LZRC or the **pixel coder PXC** (remove the row
+     filters, weighted mix of 6 predictors, optional color transform, context arithmetic coding)
+   - **JPEG** (`src/jpgx.rs`): baseline/extended with Huffman, 1–4 components, any
+     subsampling, restart markers. Decode the scan into DCT coefficients, re-encode them with a
+     context model (neighboring blocks), recreate the Huffman stream exactly when unpacking.
+     Progressive/arithmetic JPEGs stay unchanged.
+4. **Classify & choose filters** per file, by trial compression with the LZRC core:
+   | Filter | for | Effect |
    |---|---|---|
-   | x86-Split | EXE/DLL/SO | Operanden von CALL/JMP/Jcc in eigenen Strom, als absolute Ziele (BCJ2-Prinzip, längenerhaltend) |
-   | x86-BCJ | EXE/DLL/SO | relative CALL/JMP-Ziele → absolut (gleiche Ziele = gleiche Bytes) |
-   | Feld-Split | DDS BC1–BC5 | Endpunkte und Indizes der 4×4-Blöcke getrennt |
-   | Wort-Vorhersage | Vertex-Puffer, PCM, Heightmaps | 16/32-Bit-Werte aus dem vorigen Datensatz vorhersagen (Ordnung 1/2), Rest in Byte-Planes |
-   | Delta / Shuffle | sonstige Strukturdaten | Byte-Delta bzw. Byte-Planes mit erkanntem Stride (1–64 Byte) |
-   | – | Ogg, Video, nicht reproduzierbare PNG | als „bereits komprimiert“ erkannt und nur gespeichert |
-5. **Sortieren** nach Klasse, Endung und Name (ähnliche Dateien landen im selben Fenster)
-6. **Komprimieren** in unabhängigen 64-MiB-Blöcken, parallel, mit **LZRC**
-   (LZ77 + Binärbaum-Match-Finder + optimales Parsing + adaptiver Range Coder,
-   LZMA-Prinzip, eigene Implementierung) – wahlweise `--xz` als Kern (nur mit `--features xz`).
-   **Textblöcke** (4 MiB, reiner Text) werden mit dem Context-Mixing-Kern
-   **TCM** kodiert (Ordnungen 0–6, Wort-, Spalten- und Match-Modell, zwei Mischnetze,
-   zwei APM-Stufen); LZRC wird dort nur noch zusätzlich probiert, wenn eine schnelle
-   Schätzung ihm eine Chance gibt (auf Text fast nie). Abschaltbar mit `--no-cm`.
-   TCM entpackt nur ~1,5 MB/s je Thread; 4 statt 8 MiB kosten +0,45 % Textgröße,
-   verteilen das Entpacken aber auf mehr Threads.
+   | x86 split | EXE/DLL/SO | operands of CALL/JMP/Jcc in a separate stream, as absolute targets (BCJ2 principle, length-preserving) |
+   | x86 BCJ | EXE/DLL/SO | relative CALL/JMP targets → absolute (same targets = same bytes) |
+   | field split | DDS BC1–BC5 | endpoints and indices of the 4×4 blocks separated |
+   | word prediction | vertex buffers, PCM, height maps | predict 16/32-bit values from the previous record (order 1/2), residuals in byte planes |
+   | delta / shuffle | other structured data | byte delta or byte planes with a detected stride (1–64 bytes) |
+   | – | Ogg, video, non-reproducible PNG | detected as "already compressed" and only stored |
+5. **Sort** by class, extension and name (similar files end up in the same window)
+6. **Compress** in independent 64 MiB blocks, in parallel, with **LZRC**
+   (LZ77 + binary-tree match finder + optimal parsing + adaptive range coder, LZMA principle,
+   own implementation) – optionally `--xz` as the core (only with `--features xz`).
+   **Text blocks** (4 MiB, pure text) are coded with the context-mixing core **TCM**
+   (orders 0–6, word, column and match models, two mixers, two APM stages); LZRC is only also
+   tried there if a fast estimate gives it a chance (almost never on text). Can be disabled
+   with `--no-cm`. TCM unpacks only ~1.5 MB/s per thread; 4 instead of 8 MiB costs +0.45 %
+   text size but spreads unpacking over more threads.
 
-Alle Kerne rechnen **nur mit Ganzzahlen**: Linux und Windows erzeugen und lesen
-dieselben Archive bitgleich (in der CI geprüft: Linux ↔ Windows-.exe unter Wine).
+All cores use **integers only**: Linux and Windows create and read the same archives
+bit-identically (checked in CI: Linux ↔ Windows .exe under Wine).
 
-## Geschwindigkeit (Rust-Version)
+## Speed (Rust version)
 
-Phasenzeiten beim Packen und Zeiten je Block beim Entpacken zeigt `GPK_ZEITEN=1 gpk …`.
+`GPK_TIMINGS=1 gpk …` prints phase timings when packing and per-block timings when unpacking.
 
-- **Filterwahl**: Für Strukturdaten gibt es bis zu ~13 Filterkandidaten. Ein schneller
-  Schätzer (`lzrc::estimate`: gleiches Modell und gleicher Range-Coder, aber gieriges
-  Parsing statt optimaler DP) wählt die zwei aussichtsreichsten vor; echt probekomprimiert
-  werden nur diese und „ohne Filter“. Gemessen: Klassifizieren 21,3 → 12,5 s,
-  Archiv +2,5 KB.
-- **Reihenfolge**: Beim Packen, Klassifizieren und Entpacken laufen die teuersten Aufgaben
-  zuerst (Text-CM-Blöcke ~40× teurer als LZRC), damit am Ende kein großer Brocken allein läuft.
-- Ausprobiert und verworfen (kein messbarer Gewinn): Mikro-Optimierungen und SSE4.2/AVX2
-  im Text-Kern (der Kern hängt an der seriellen Abhängigkeit pro Bit), andere Parse-Fenster,
-  Preis-Aktualisierungsintervalle und Suchtiefen im LZRC-Encoder (alle innerhalb ±0,1 %).
-- Grenze beim Packen: Ein 64-MiB-LZRC-Block braucht allein ~45 s (Binärbaum mit 0,5 GB
-  wird groß, die Suche langsamer); er bestimmt bei großen Blöcken die Mindestdauer.
+- **Filter choice**: structured data has up to ~13 filter candidates. A fast estimator
+  (`lzrc::estimate`: same model and same range coder, but greedy parsing instead of the
+  optimal DP) preselects the two most promising ones; only these and "no filter" are really
+  trial-compressed. Measured: classification 21.3 → 12.5 s, archive +2.5 KB.
+- **Order**: when packing, classifying and unpacking, the most expensive tasks run first
+  (text CM blocks are ~40× more expensive than LZRC) so that no large chunk runs alone at the end.
+- Tried and discarded (no measurable gain): micro-optimizations and SSE4.2/AVX2 in the text
+  core (the core is bound by the serial dependency per bit), other parse windows, price update
+  intervals and search depths in the LZRC encoder (all within ±0.1 %).
+- Limit when packing: a single 64 MiB LZRC block alone takes ~45 s (the binary tree grows to
+  0.5 GB and the search gets slower); with large blocks it determines the minimum duration.
 
-| Test-Build 308 MB, 4 Threads | vorher | nachher |
+| Test build 308 MB, 4 threads | before | after |
 |---|---:|---:|
-| Archiv | 120.266.104 B | 120.278.468 B (+0,01 %) |
-| Packen | 92,8 s, 1,46 GB RAM | 64,3 s, 1,67 GB RAM |
-| Entpacken | 8,3 s, 0,44 GB RAM | 6,8 s, 0,61 GB RAM |
+| Archive | 120,266,104 B | 120,278,468 B (+0.01 %) |
+| Pack | 92.8 s, 1.46 GB RAM | 64.3 s, 1.67 GB RAM |
+| Unpack | 8.3 s, 0.44 GB RAM | 6.8 s, 0.61 GB RAM |
 
-## Ergebnisse v3 (erweiterter Test-Build 327,6 MB, mit 36 JPEGs)
+## Results v3 (extended test build 327.6 MB, with 36 JPEGs)
 
-| Verfahren | Größe nachher | Differenz | Packen | Entpacken (4 Threads / 1 Thread) |
+| Method | Size after | Difference | Pack | Unpack (4 threads / 1 thread) |
 |---|---:|---:|---:|---:|
-| zip -9 (Deflate je Datei) | 187,2 MB | −42,9 % | 40,0 s | 3,1 s |
-| tar + zstd -19 --long=27 | 162,8 MB | −50,3 % | 191,8 s | 0,9 s |
-| tar + xz -9e | 149,2 MB | −54,5 % | 311,1 s | 7,3 s |
-| GPK v2 | 128,5 MB | −60,8 % | 105,4 s | 2,7 s / 7,5 s |
-| GPK v3 `--no-cm` | 126,3 MB | −61,5 % | 100,6 s | 4,1 s / 9,3 s |
-| **GPK v3** | **125,5 MB** | **−61,7 %** | 118,5 s | 9,9 s / 33,5 s |
+| zip -9 (Deflate per file) | 187.2 MB | −42.9 % | 40.0 s | 3.1 s |
+| tar + zstd -19 --long=27 | 162.8 MB | −50.3 % | 191.8 s | 0.9 s |
+| tar + xz -9e | 149.2 MB | −54.5 % | 311.1 s | 7.3 s |
+| GPK v2 | 128.5 MB | −60.8 % | 105.4 s | 2.7 s / 7.5 s |
+| GPK v3 `--no-cm` | 126.3 MB | −61.5 % | 100.6 s | 4.1 s / 9.3 s |
+| **GPK v3** | **125.5 MB** | **−61.7 %** | 118.5 s | 9.9 s / 33.5 s |
 
-Alle GPK-Läufe bitgenau geprüft. Rohdaten: `results_v3.csv`.
+All GPK runs verified bit-exactly. Raw data: `results_v3.csv`.
 
-### Was v2 → v3 je Baustein gebracht hat
+### What v2 → v3 gained per component
 
-| Baustein | Gruppe | v2 | v3 | Vergleich |
+| Component | Group | v2 | v3 | Comparison |
 |---|---|---:|---:|---|
-| JPEG-Rekompression | 36 JPEGs, 6,9 MB | ≈6,9 MB | 5,2 MB (−25 %) | 86 Test-JPEGs: 70 bitgenau, 16 abgelehnt (progressiv u. ä.), 0 Fehler |
-| Text-Kern TCM | Text 25,1 MB | 2,99 MB | 2,21 MB (−26 %) | PPMd 2,41 MB, ZPAQ -m5 1,96 MB; entpackt ~1 MB/s je Kern |
-| Pixel-Coder PXC | PNG 10,8 MB | 6,06 MB | 5,73 MB (−5,4 %) | JPEG XL verlustfrei 5,27 MB |
-| x86-Split | Code 66,6 MB | 13,10 MB | 13,03 MB (−0,5 %) | 7-Zip BCJ2 −5 % ggü. BCJ; selektive Variante gemessen nur −1,5 % mehr |
+| JPEG recompression | 36 JPEGs, 6.9 MB | ≈6.9 MB | 5.2 MB (−25 %) | 86 test JPEGs: 70 bit-exact, 16 rejected (progressive etc.), 0 errors |
+| Text core TCM | text 25.1 MB | 2.99 MB | 2.21 MB (−26 %) | PPMd 2.41 MB, ZPAQ -m5 1.96 MB; unpacks ~1 MB/s per core |
+| Pixel coder PXC | PNG 10.8 MB | 6.06 MB | 5.73 MB (−5.4 %) | lossless JPEG XL 5.27 MB |
+| x86 split | code 66.6 MB | 13.10 MB | 13.03 MB (−0.5 %) | 7-Zip BCJ2 −5 % vs. BCJ; a selective variant measured only −1.5 % more |
 
-**Abwägung:** Der Text-Kern spart am meisten je Byte, macht das Entpacken aber
-langsam (hier 9,9 statt 4,1 s mit 4 Threads). Für schnelle Installationen `--no-cm`
-nutzen – dann bleiben JPEG-, PNG- und x86-Verbesserungen bei kaum langsamerem Entpacken.
+**Trade-off:** the text core saves the most per byte but makes unpacking slow (here 9.9 instead
+of 4.1 s with 4 threads). For fast installations use `--no-cm` – then the JPEG, PNG and x86
+improvements remain with hardly slower unpacking.
 
-## Ergebnisse v2 (Test-Build 320,6 MB, 954 Einträge, ohne JPEGs)
+## Results v2 (test build 320.6 MB, 954 entries, without JPEGs)
 
-| Verfahren | Größe nachher | Differenz | Packen | Entpacken |
+| Method | Size after | Difference | Pack | Unpack |
 |---|---:|---:|---:|---:|
-| zip -9 (Deflate je Datei) | 180,3 MB | −43,7 % | 30,6 s | 2,1 s |
-| tar + zstd -19 --long=27 | 155,9 MB | −51,4 % | 141,6 s | 0,7 s |
-| tar + xz -9e | 142,2 MB | −55,7 % | 236,3 s | 4,9 s |
-| GPK v1 | 133,4 MB | −58,4 % | 57,3 s | 1,5 s |
-| **GPK v2 (optimiert)** | **121,7 MB** | **−62,0 %** | 76,0 s | 2,0 s (1 Thread: 5,2 s) |
+| zip -9 (Deflate per file) | 180.3 MB | −43.7 % | 30.6 s | 2.1 s |
+| tar + zstd -19 --long=27 | 155.9 MB | −51.4 % | 141.6 s | 0.7 s |
+| tar + xz -9e | 142.2 MB | −55.7 % | 236.3 s | 4.9 s |
+| GPK v1 | 133.4 MB | −58.4 % | 57.3 s | 1.5 s |
+| **GPK v2 (optimized)** | **121.7 MB** | **−62.0 %** | 76.0 s | 2.0 s (1 thread: 5.2 s) |
 
-Vollständige Tabelle inkl. Ablationen: `vergleich.md`, Rohdaten: `results_build.csv`.
+Complete table including ablations: `comparison.md`, raw data: `results_build.csv`.
 
-### Was die Optimierung v1 → v2 gebracht hat (gemessen je Asset-Gruppe)
+### What the optimization v1 → v2 gained (measured per asset group)
 
-| Gruppe | v1 | v2 | Ursache |
+| Group | v1 | v2 | Cause |
 |---|---:|---:|---|
-| Meshes | 25,6 MB | 18,6 MB | Stride-Erkennung bis 64 Byte (Vertex = 48 Byte), Wort-Vorhersage, Filterwahl mit LZRC statt GLZ-Schätzer |
-| PNG (UI) | 10,8 MB | 6,1 MB | PNG-Rekompression |
-| WAV | 8,5 MB | 8,3 MB | Wort-Vorhersage |
-| Texturen, Code, Text | unverändert | | getestet: andere Split-Layouts und lc/lp/pb-Varianten bringen ≤ 0,5 % |
+| Meshes | 25.6 MB | 18.6 MB | stride detection up to 64 bytes (vertex = 48 bytes), word prediction, filter choice with LZRC instead of the GLZ estimator |
+| PNG (UI) | 10.8 MB | 6.1 MB | PNG recompression |
+| WAV | 8.5 MB | 8.3 MB | word prediction |
+| Textures, code, text | unchanged | | tested: other split layouts and lc/lp/pb variants gain ≤ 0.5 % |
 
-Die Gewinne kommen aus der **Vorverarbeitung**. Der LZRC-Kern liegt auf xz-Niveau
-(mit `--xz` ist das Archiv 0,3 MB kleiner).
+The gains come from **preprocessing**. The LZRC core is at xz level (with `--xz` the archive is
+0.3 MB smaller).
 
-## Erkenntnisse aus der Recherche
+## Findings from research
 
-- **Steam (SteamPipe)** teilt Dateien in ~1-MB-Chunks, komprimiert jeden mit LZMA
-  und verschlüsselt ihn; Updates laden nur geänderte Chunks. Valve rät, Pack-Dateien
-  *nicht* selbst zu komprimieren. Epic arbeitet laut Analysen ebenfalls mit ~1-MiB-Chunks.
-  → GPKs solide 64-MiB-Blöcke sind ideal für den **Erst-Download**, aber schlecht für
-  **Updates**: Eine kleine Änderung invalidiert einen ganzen Block.
-- **Oodle Texture** (RAD/Epic): RDO-Encoding verkleinert BCn-Texturen nach Kompression um
-  bis zu ~50 %, ist aber verlustbehaftet (Textur-Encoder, nicht Packer). Das verlustfreie
-  **BC7Prep** bringt laut RAD 5–15 % bei BC7.
-- **Precomp / Preflate**: Deflate-Ströme (PNG, ZIP, PDF) entpacken und bitgenau
-  rekonstruieren; Preflate schafft das auch für Nicht-zlib-Encoder mit kleinen
-  Korrekturdaten. GPK nutzt die einfache Variante (nur zlib-reproduzierbare Ströme,
-  ~54 % der getesteten echten PNGs).
+- **Steam (SteamPipe)** splits files into ~1 MB chunks, compresses each with LZMA and
+  encrypts it; updates only download changed chunks. Valve advises *not* to compress pack files
+  yourself. According to analyses, Epic also works with ~1 MiB chunks.
+  → GPK's solid 64 MiB blocks are ideal for the **initial download**, but bad for **updates**:
+  a small change invalidates a whole block.
+- **Oodle Texture** (RAD/Epic): RDO encoding shrinks BCn textures after compression by up to
+  ~50 %, but it is lossy (a texture encoder, not a packer). The lossless **BC7Prep** gains
+  5–15 % on BC7 according to RAD.
+- **Precomp / Preflate**: inflate Deflate streams (PNG, ZIP, PDF) and reconstruct them
+  bit-exactly; Preflate manages this even for non-zlib encoders with small correction data.
+  GPK uses the simple variant (only zlib-reproducible streams, ~54 % of the real PNGs tested).
 
-## Grenzen / nächste Schritte
+## Limits / next steps
 
-- Test-Build ist teilweise synthetisch (Code, Skripte, Schriften echt).
-- **Update-freundlich machen**: inhaltsdefiniertes Chunking (z. B. ~1 MiB) und
-  Chunk-Dedup gegen die Vorversion, damit Patches klein bleiben.
-- Preflate-artige Korrekturdaten für PNGs fremder Encoder; BC7-Transform (BC7Prep-Idee).
-- Progressive JPEGs (heute unverändert gespeichert); Text-Kern schneller machen
-  (z. B. PPMd-artiges Modell) oder nur für große Textanteile nutzen.
-- Packen ist bewusst langsam (Probekompressionen); Entpacken ist parallel und
-  schneller als typische Downloadraten.
+- The test build is partly synthetic (code, scripts and fonts are real).
+- **Make it update-friendly**: content-defined chunking (e.g. ~1 MiB) and chunk dedup against
+  the previous version so that patches stay small.
+- Preflate-like correction data for PNGs from other encoders; BC7 transform (BC7Prep idea).
+- Progressive JPEGs (stored unchanged today); make the text core faster (e.g. a PPMd-like
+  model) or use it only for large amounts of text.
+- Packing is slow on purpose (trial compressions); unpacking is parallel and faster than
+  typical download rates.

@@ -2,7 +2,7 @@ file,codec,raw,compressed,ratio,comp_MBps,decomp_MBps,filters
 audio_pcm16_stereo.raw,GLZ -1,1764000,1149295,1.5349,17.08,640.30,none=0 delta=0 shuf=0 shufdelta=2 stored=0
 audio_pcm16_stereo.raw,GLZ -5,1764000,1148262,1.5362,7.37,390.16,none=0 delta=0 shuf=0 shufdelta=2 stored=0
 audio_pcm16_stereo.raw,GLZ -9,1764000,1141534,1.5453,1.61,426.76,none=0 delta=0 shuf=0 shufdelta=2 stored=0
-audio_pcm16_stereo.raw,GLZ -9 (ohne Filter),1764000,1614700,1.0925,11.42,419.97,
+audio_pcm16_stereo.raw,GLZ -9 (no filter),1764000,1614700,1.0925,11.42,419.97,
 audio_pcm16_stereo.raw,LZ4,1764000,1770919,0.9961,10687.36,13421.22,
 audio_pcm16_stereo.raw,LZ4HC -12,1764000,1770005,0.9966,41.10,11879.57,
 audio_pcm16_stereo.raw,zlib -6,1764000,1595800,1.1054,42.95,200.65,
@@ -14,7 +14,7 @@ audio_pcm16_stereo.raw,xz -6,1764000,1450864,1.2158,3.96,22.17,
 dialog_de.json,GLZ -1,1600714,293099,5.4613,93.18,1051.67,none=2 delta=0 shuf=0 shufdelta=0 stored=0
 dialog_de.json,GLZ -5,1600714,247291,6.4730,25.85,1483.99,none=2 delta=0 shuf=0 shufdelta=0 stored=0
 dialog_de.json,GLZ -9,1600714,233915,6.8431,2.79,1630.84,none=2 delta=0 shuf=0 shufdelta=0 stored=0
-dialog_de.json,GLZ -9 (ohne Filter),1600714,233915,6.8431,2.77,1494.89,
+dialog_de.json,GLZ -9 (no filter),1600714,233915,6.8431,2.77,1494.89,
 dialog_de.json,LZ4,1600714,460365,3.4771,834.07,3638.61,
 dialog_de.json,LZ4HC -12,1600714,285385,5.6090,13.25,5881.77,
 dialog_de.json,zlib -6,1600714,257538,6.2154,56.22,582.21,
@@ -26,7 +26,7 @@ dialog_de.json,xz -6,1600714,192052,8.3348,2.68,184.70,
 heightmap_u16.raw,GLZ -1,2097152,1337258,1.5682,18.95,630.98,none=0 delta=0 shuf=0 shufdelta=2 stored=0
 heightmap_u16.raw,GLZ -5,2097152,1333115,1.5731,10.62,402.31,none=0 delta=0 shuf=0 shufdelta=2 stored=0
 heightmap_u16.raw,GLZ -9,2097152,1319860,1.5889,1.71,461.71,none=0 delta=0 shuf=0 shufdelta=2 stored=0
-heightmap_u16.raw,GLZ -9 (ohne Filter),2097152,2040426,1.0278,13.64,425.41,
+heightmap_u16.raw,GLZ -9 (no filter),2097152,2040426,1.0278,13.64,425.41,
 heightmap_u16.raw,LZ4,2097152,2105378,0.9961,12060.06,14573.91,
 heightmap_u16.raw,LZ4HC -12,2097152,2101973,0.9977,48.29,12333.12,
 heightmap_u16.raw,zlib -6,2097152,1995478,1.0510,38.23,211.69,
@@ -38,7 +38,7 @@ heightmap_u16.raw,xz -6,2097152,1784396,1.1753,3.28,23.28,
 level_tilemap_u8.bin,GLZ -1,1048576,47639,22.0109,108.06,2097.43,none=1 delta=0 shuf=0 shufdelta=0 stored=0
 level_tilemap_u8.bin,GLZ -5,1048576,35046,29.9200,64.68,3053.06,none=1 delta=0 shuf=0 shufdelta=0 stored=0
 level_tilemap_u8.bin,GLZ -9,1048576,34849,30.0891,9.99,3379.83,none=1 delta=0 shuf=0 shufdelta=0 stored=0
-level_tilemap_u8.bin,GLZ -9 (ohne Filter),1048576,34849,30.0891,9.37,3370.27,
+level_tilemap_u8.bin,GLZ -9 (no filter),1048576,34849,30.0891,9.37,3370.27,
 level_tilemap_u8.bin,LZ4,1048576,149906,6.9949,1351.03,2671.97,
 level_tilemap_u8.bin,LZ4HC -12,1048576,48495,21.6224,7.88,9274.36,
 level_tilemap_u8.bin,zlib -6,1048576,42179,24.8601,113.16,1061.26,
@@ -50,7 +50,7 @@ level_tilemap_u8.bin,xz -6,1048576,27936,37.5349,4.94,714.59,
 mesh_indices_u32.bin,GLZ -1,2442264,487875,5.0059,33.68,588.83,none=0 delta=3 shuf=0 shufdelta=0 stored=0
 mesh_indices_u32.bin,GLZ -5,2442264,394224,6.1951,14.04,621.01,none=0 delta=3 shuf=0 shufdelta=0 stored=0
 mesh_indices_u32.bin,GLZ -9,2442264,365137,6.6886,1.82,730.65,none=0 delta=3 shuf=0 shufdelta=0 stored=0
-mesh_indices_u32.bin,GLZ -9 (ohne Filter),2442264,870893,2.8043,25.99,533.49,
+mesh_indices_u32.bin,GLZ -9 (no filter),2442264,870893,2.8043,25.99,533.49,
 mesh_indices_u32.bin,LZ4,2442264,1538441,1.5875,512.05,2719.18,
 mesh_indices_u32.bin,LZ4HC -12,2442264,1443531,1.6919,36.04,2397.19,
 mesh_indices_u32.bin,zlib -6,2442264,899557,2.7150,20.81,281.26,
@@ -62,7 +62,7 @@ mesh_indices_u32.bin,xz -6,2442264,614272,3.9759,4.17,58.57,
 mesh_vertices.bin,GLZ -1,3276800,1281166,2.5577,25.87,519.46,none=0 delta=0 shuf=0 shufdelta=4 stored=0
 mesh_vertices.bin,GLZ -5,3276800,1277587,2.5648,22.63,531.49,none=0 delta=0 shuf=0 shufdelta=4 stored=0
 mesh_vertices.bin,GLZ -9,3276800,1276763,2.5665,16.87,500.89,none=0 delta=0 shuf=0 shufdelta=4 stored=0
-mesh_vertices.bin,GLZ -9 (ohne Filter),3276800,1942529,1.6869,3.67,479.47,
+mesh_vertices.bin,GLZ -9 (no filter),3276800,1942529,1.6869,3.67,479.47,
 mesh_vertices.bin,LZ4,3276800,2691207,1.2176,668.69,4331.51,
 mesh_vertices.bin,LZ4HC -12,3276800,2475515,1.3237,11.52,4804.18,
 mesh_vertices.bin,zlib -6,3276800,2119644,1.5459,24.01,257.57,
@@ -74,7 +74,7 @@ mesh_vertices.bin,xz -6,3276800,1479836,2.2143,2.76,35.46,
 normalmap_rgb8.raw,GLZ -1,786432,536906,1.4647,13.49,352.26,none=0 delta=0 shuf=0 shufdelta=1 stored=0
 normalmap_rgb8.raw,GLZ -5,786432,536197,1.4667,9.09,340.23,none=0 delta=0 shuf=0 shufdelta=1 stored=0
 normalmap_rgb8.raw,GLZ -9,786432,536258,1.4665,7.84,365.28,none=0 delta=0 shuf=0 shufdelta=1 stored=0
-normalmap_rgb8.raw,GLZ -9 (ohne Filter),786432,604686,1.3006,17.03,451.71,
+normalmap_rgb8.raw,GLZ -9 (no filter),786432,604686,1.3006,17.03,451.71,
 normalmap_rgb8.raw,LZ4,786432,789517,0.9961,24576.01,42130.97,
 normalmap_rgb8.raw,LZ4HC -12,786432,731668,1.0748,39.28,3474.91,
 normalmap_rgb8.raw,zlib -6,786432,632531,1.2433,33.89,191.73,
@@ -86,7 +86,7 @@ normalmap_rgb8.raw,xz -6,786432,568004,1.3846,3.98,32.17,
 precompressed_blob.bin,GLZ -1,1048576,1048599,1.0000,19.73,30499.72,none=0 delta=0 shuf=0 shufdelta=0 stored=1
 precompressed_blob.bin,GLZ -5,1048576,1048599,1.0000,11.57,30851.27,none=0 delta=0 shuf=0 shufdelta=0 stored=1
 precompressed_blob.bin,GLZ -9,1048576,1048599,1.0000,12.84,30838.55,none=0 delta=0 shuf=0 shufdelta=0 stored=1
-precompressed_blob.bin,GLZ -9 (ohne Filter),1048576,1048599,1.0000,13.33,27512.68,
+precompressed_blob.bin,GLZ -9 (no filter),1048576,1048599,1.0000,13.33,27512.68,
 precompressed_blob.bin,LZ4,1048576,1052690,0.9961,18935.20,28882.25,
 precompressed_blob.bin,LZ4HC -12,1048576,1052678,0.9961,47.82,26591.34,
 precompressed_blob.bin,zlib -6,1048576,1048902,0.9997,57.83,2929.98,
@@ -98,7 +98,7 @@ precompressed_blob.bin,xz -6,1048576,1048680,0.9999,4.55,12751.21,
 savegame_entities.bin,GLZ -1,896000,482041,1.8588,24.40,524.53,none=1 delta=0 shuf=0 shufdelta=0 stored=0
 savegame_entities.bin,GLZ -5,896000,460715,1.9448,9.13,504.72,none=1 delta=0 shuf=0 shufdelta=0 stored=0
 savegame_entities.bin,GLZ -9,896000,458789,1.9530,1.36,552.47,none=1 delta=0 shuf=0 shufdelta=0 stored=0
-savegame_entities.bin,GLZ -9 (ohne Filter),896000,458789,1.9530,0.94,450.21,
+savegame_entities.bin,GLZ -9 (no filter),896000,458789,1.9530,0.94,450.21,
 savegame_entities.bin,LZ4,896000,625498,1.4325,403.17,3736.37,
 savegame_entities.bin,LZ4HC -12,896000,514996,1.7398,2.50,4684.29,
 savegame_entities.bin,zlib -6,896000,490999,1.8249,16.33,270.44,
@@ -110,7 +110,7 @@ savegame_entities.bin,xz -6,896000,413596,2.1664,2.36,37.99,
 texture_rgba8.raw,GLZ -1,4194304,1767751,2.3727,14.83,408.66,none=0 delta=0 shuf=0 shufdelta=4 stored=0
 texture_rgba8.raw,GLZ -5,4194304,1772544,2.3663,3.65,402.09,none=0 delta=0 shuf=0 shufdelta=4 stored=0
 texture_rgba8.raw,GLZ -9,4194304,1771909,2.3671,3.89,409.57,none=0 delta=0 shuf=0 shufdelta=4 stored=0
-texture_rgba8.raw,GLZ -9 (ohne Filter),4194304,2372965,1.7675,3.78,555.53,
+texture_rgba8.raw,GLZ -9 (no filter),4194304,2372965,1.7675,3.78,555.53,
 texture_rgba8.raw,LZ4,4194304,3989703,1.0513,706.90,4284.18,
 texture_rgba8.raw,LZ4HC -12,4194304,2930846,1.4311,19.33,2539.82,
 texture_rgba8.raw,zlib -6,4194304,2467124,1.7001,24.96,214.71,

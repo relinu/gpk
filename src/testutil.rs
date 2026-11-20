@@ -1,4 +1,4 @@
-//! Deterministischer Zufallsgenerator für Tests (xorshift64*).
+//! Deterministic random generator for tests (xorshift64*).
 pub struct Rng(u64);
 impl Rng {
     pub fn new(seed: u64) -> Self {
@@ -15,7 +15,7 @@ impl Rng {
     }
 }
 
-/// Die in `legacy-c/gpk/tests/sample_jpegs.h` eingebetteten Beispiel-JPEGs.
+/// The sample JPEGs embedded in `legacy-c/gpk/tests/sample_jpegs.h`.
 pub fn jpeg_samples() -> Vec<Vec<u8>> {
     let h = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/legacy-c/gpk/tests/sample_jpegs.h")).unwrap();
     h.lines()

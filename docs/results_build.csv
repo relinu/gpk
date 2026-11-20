@@ -1,16 +1,16 @@
-methode,bytes,pack_s,entpack_s
-tar (unkomprimiert),321341440,0,0
-zip -9 (Deflate je Datei),180348135,30.610151107,2.069952582
-tar + xz -9e (solid, 64 MiB Fenster),142165208,236.325422533,4.860161161
+method,bytes,pack_s,unpack_s
+tar (uncompressed),321341440,0,0
+zip -9 (Deflate per file),180348135,30.610151107,2.069952582
+tar + xz -9e (solid, 64 MiB window),142165208,236.325422533,4.860161161
 tar + zstd -19 --long=27,155936393,141.626854876,.665061915
 tar + zstd -22 --long=27,155593045,179.607352784,.820839699
-GPK v1 ohne Vorverarbeitung (nur LZRC-Kern),141196002,113.047410593,3.109477318
-GPK v1 Vorverarbeitung + xz-Kern,133092219,56.319169153,1.395844613
-GPK v1 ohne Filter,141019531,63.718449739,1.563162511
-GPK v1 ohne Sortierung,133601959,54.904800926,1.435955578
-GPK v1 ohne Deduplizierung,133531530,60.056714276,1.764611277
-GPK v1 (komplett),133399476,57.267675924,1.477333373
-GPK v1 (komplett, Entpacken 1 Thread),133399476,-,4.728463296
-GPK v2 optimiert (komplett),121676538,76.0,1.98
-GPK v2 optimiert (Entpacken 1 Thread),121676538,-,5.23
-GPK v2 Vorverarbeitung + xz-Kern,121388689,74.4,1.90
+GPK v1 without preprocessing (LZRC core only),141196002,113.047410593,3.109477318
+GPK v1 preprocessing + xz core,133092219,56.319169153,1.395844613
+GPK v1 without filters,141019531,63.718449739,1.563162511
+GPK v1 without sorting,133601959,54.904800926,1.435955578
+GPK v1 without deduplication,133531530,60.056714276,1.764611277
+GPK v1 (complete),133399476,57.267675924,1.477333373
+GPK v1 (complete, unpacking with 1 thread),133399476,-,4.728463296
+GPK v2 optimized (complete),121676538,76.0,1.98
+GPK v2 optimized (unpacking with 1 thread),121676538,-,5.23
+GPK v2 preprocessing + xz core,121388689,74.4,1.90

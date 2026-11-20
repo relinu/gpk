@@ -1,8 +1,7 @@
-//! Umkehrbare Vorfilter für Spieldateien (Port von `legacy-c/gpk/filters.c`).
+//! Reversible pre-filters for game files (port of `legacy-c/gpk/filters.c`).
 //!
-//! Alle Filter erhalten die Länge: `encode` und `decode` arbeiten auf gleich
-//! langen Puffern. Bei beschädigten Daten liefern sie Unsinn, aber nie einen
-//! Speicherfehler oder Panic.
+//! All filters preserve the length: `encode` and `decode` work on buffers of equal
+//! length. On corrupted data they produce garbage, but never a memory error or panic.
 
 pub const FT_NONE: u8 = 0;
 pub const FT_DELTA: u8 = 1;
@@ -15,12 +14,12 @@ pub const FT_X86S: u8 = 7;
 pub const FT_COUNT: u8 = 8;
 
 pub const FILTER_NAMES: [&str; FT_COUNT as usize] =
-    ["none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "wort-praediktion", "x86-split"];
+    ["none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "word-pred", "x86-split"];
 
-/// Filterbeschreibung (Feldlayout wie im Archivindex).
-/// FT_WPRED: `stride` = Datensatzgröße, `fields[0]` = Wortgröße (2|4),
-/// `fields[1]` = Ordnung (1|2), `fields[2]` = 1 → Byte-Planes nach Datensatz.
-/// FT_SPLIT: `fields[..nfields]` = Feldbreiten, `skip` = Kopfbytes am Dateianfang.
+/// Filter description (field layout as in the archive index).
+/// FT_WPRED: `stride` = record size, `fields[0]` = word size (2|4),
+/// `fields[1]` = order (1|2), `fields[2]` = 1 → byte planes by record.
+/// FT_SPLIT: `fields[..nfields]` = field widths, `skip` = header bytes at the start of the file.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct FSpec {
     pub id: u8,
@@ -37,7 +36,7 @@ impl FSpec {
     pub fn with_stride(id: u8, stride: u8) -> Self {
         FSpec { id, stride, ..Default::default() }
     }
-    /// Plausibilitätsprüfung beim Lesen eines Archivs.
+    /// Plausibility check when reading an archive.
     pub fn is_valid(&self) -> bool {
         if self.id >= FT_COUNT || self.nfields > 6 {
             return false;
@@ -63,7 +62,7 @@ fn wr32(b: &mut [u8], i: usize, v: u32) {
     b[i..i + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-// ---- Byte-Planes -------------------------------------------------------
+// ---- Byte planes -------------------------------------------------------
 fn shuffle(inp: &[u8], out: &mut [u8], s: usize) {
     let n = inp.len();
     if s == 0 {
@@ -94,9 +93,9 @@ fn unshuffle(inp: &[u8], out: &mut [u8], s: usize) {
 }
 
 // ---- x86 BCJ -----------------------------------------------------------
-/// E8/E9 mit kleinem Operanden (oberstes Byte 00/FF): Ziel absolut machen
-/// (25-Bit-Regel, bijektiv). Nach jedem E8/E9 werden die 4 Folgebytes immer
-/// übersprungen, damit Encoder und Decoder dieselben Entscheidungen treffen.
+/// E8/E9 with a small operand (top byte 00/FF): make the target absolute
+/// (25-bit rule, bijective). After every E8/E9 the 4 following bytes are always
+/// skipped so that encoder and decoder make the same decisions.
 fn bcj(b: &mut [u8], off: u64, enc: bool) {
     let n = b.len();
     let mut i = 0;
@@ -119,7 +118,7 @@ fn bcj(b: &mut [u8], off: u64, enc: bool) {
     }
 }
 
-// ---- x86 mit getrennten Strömen (BCJ2-Prinzip) ---------------------------
+// ---- x86 with separate streams (BCJ2 principle) --------------------------
 #[inline]
 fn x86_abs(v: u32, pos: u32, enc: bool) -> u32 {
     if v >> 24 != 0x00 && v >> 24 != 0xFF {
@@ -132,7 +131,7 @@ fn x86_abs(v: u32, pos: u32, enc: bool) -> u32 {
     }
     v
 }
-/// Länge des Opcodes (1 für E8/E9, 2 für 0F 8x), wenn ein 4-Byte-Operand folgt.
+/// Length of the opcode (1 for E8/E9, 2 for 0F 8x) if a 4-byte operand follows.
 #[inline]
 fn x86_oplen(b0: u8, b1: Option<u8>, i: usize, n: usize) -> usize {
     if b0 & 0xFE == 0xE8 && i + 5 <= n {
@@ -165,7 +164,7 @@ fn x86s_enc(inp: &[u8], out: &mut [u8], off: u64) {
 fn x86s_dec(inp: &[u8], out: &mut [u8], off: u64) {
     let n = inp.len();
     let (mut i, mut mp, mut k) = (0usize, 0usize, 0usize);
-    // mp <= i und 4k <= i - mp gelten immer, daher bleiben alle Zugriffe in [0, n).
+    // mp <= i and 4k <= i - mp always hold, so all accesses stay within [0, n).
     while i < n {
         let ol = x86_oplen(inp[mp], inp.get(mp + 1).copied(), i, n);
         if ol == 0 {
@@ -184,7 +183,7 @@ fn x86s_dec(inp: &[u8], out: &mut [u8], off: u64) {
     }
 }
 
-// ---- Feld-Split --------------------------------------------------------
+// ---- Field split -------------------------------------------------------
 fn split_layout(f: &FSpec, n: usize, off: u64) -> (usize, usize, usize) {
     let r: usize = f.fields[..(f.nfields as usize).min(6)].iter().map(|&w| w as usize).sum();
     if r == 0 {
@@ -232,7 +231,7 @@ fn split_dec(f: &FSpec, inp: &[u8], out: &mut [u8], off: u64) {
     out[used..].copy_from_slice(&inp[q..q + (n - used)]);
 }
 
-// ---- Wort-Prädiktion ----------------------------------------------------
+// ---- Word prediction ----------------------------------------------------
 #[inline]
 fn ldw(b: &[u8], i: usize, w: usize) -> u32 {
     if w == 2 {
@@ -286,7 +285,7 @@ fn wpred_core(f: &FSpec, buf: &mut [u8], enc: bool) {
     }
 }
 
-/// Filter anwenden. `out.len()` muss `inp.len()` sein. `off` = Position in der Datei.
+/// Apply the filter. `out.len()` must equal `inp.len()`. `off` = position in the file.
 pub fn encode(f: &FSpec, inp: &[u8], out: &mut [u8], off: u64) {
     assert_eq!(inp.len(), out.len());
     let s = f.stride as usize;
@@ -318,7 +317,7 @@ pub fn encode(f: &FSpec, inp: &[u8], out: &mut [u8], off: u64) {
     }
 }
 
-/// Filter umkehren. `inp` darf verändert werden.
+/// Invert the filter. `inp` may be modified.
 pub fn decode(f: &FSpec, inp: &mut [u8], out: &mut [u8], off: u64) {
     assert_eq!(inp.len(), out.len());
     let s = f.stride as usize;

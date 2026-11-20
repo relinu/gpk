@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""GPK-Rauchtest für Linux und Windows.
+"""GPK smoke test for Linux and Windows.
 
-  smoke_test.py <gpk-programm> [--wine]                      packen, entpacken, bitgenau vergleichen
-  smoke_test.py <gpk-programm> [--wine] --cross-pack A.gpk    deterministischen Baum packen
-  smoke_test.py <gpk-programm> [--wine] --cross-extract A.gpk fremdes Archiv entpacken und vergleichen
-  smoke_test.py --make-tree DIR                               nur den Test-Build anlegen (z. B. für Bytegleichheit C/Rust)
+  smoke_test.py <gpk-program> [--wine]                       pack, unpack, compare bit-exactly
+  smoke_test.py <gpk-program> [--wine] --cross-pack A.gpk     pack a deterministic tree
+  smoke_test.py <gpk-program> [--wine] --cross-extract A.gpk  unpack a foreign archive and compare
+  smoke_test.py --make-tree DIR                               only create the test build (e.g. for C/Rust checks)
 
---wine: gpk.exe unter Linux per Wine ausführen (Windows-Verhalten: keine Symlinks, keine Unix-Rechte).
+--wine: run gpk.exe under Linux via Wine (Windows behavior: no symlinks, no Unix permissions).
 
-Abgedeckt: x86-Code (BCJ), Text, PNG-Rekompression, Float-Strukturdaten, Duplikate,
-leere Dateien und Ordner, Leerzeichen im Namen; unter Linux zusätzlich Symlinks und Rechte.
-Außerdem muss ein beschädigtes Archiv mit Fehler abgelehnt werden.
+Covered: x86 code (BCJ), text, PNG and JPEG recompression, float structure data, duplicates,
+empty files and directories, spaces in names; on Linux also symlinks and permissions.
+In addition, a corrupted archive must be rejected with an error.
 """
 import argparse
 import math
@@ -24,8 +24,8 @@ import sys
 import tempfile
 import zlib
 
-WIN = os.name == "nt"          # wird bei --wine auf True gesetzt
-RUNNER = []                     # z. B. ["wine"]
+WIN = os.name == "nt"          # set to True with --wine
+RUNNER = []                     # e.g. ["wine"]
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -36,7 +36,7 @@ def write(path, data):
 
 
 def make_tree(root, with_system_files):
-    """Deterministischer Test-Build; optional mit echten Systembibliotheken."""
+    """Deterministic test build; optionally with real system libraries."""
     w = h = 256
     raw = b"".join(b"\x00" + bytes(((x ^ y) & 0xFF) if c < 3 else 255 for x in range(w) for c in range(4)) for y in range(h))
     chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
@@ -46,18 +46,18 @@ def make_tree(root, with_system_files):
     verts = b"".join(struct.pack("<8f", i * 0.5, math.sin(i * 0.01) * 10, i * 0.25, 0, 1, 0, (i % 64) / 64, (i // 64) / 64)
                      for i in range(40000))
     write(os.path.join(root, "data", "mesh.bin"), verts)
-    # JPEG aus den eingebetteten Testdaten (kein Pillow nötig): größtes Beispiel
+    # JPEG from the embedded test data (no Pillow needed): the largest sample
     hdr = open(os.path.join(REPO, "legacy-c", "gpk", "tests", "sample_jpegs.h")).read()
     jpgs = [bytes(int(v) for v in m.group(1).split(",")) for m in re.finditer(r"SAMPLE_JPEG\d\[\d+\] = \{([0-9,]+)\}", hdr)]
     write(os.path.join(root, "data", "ui", "loading.jpg"), max(jpgs, key=len))
-    write(os.path.join(root, "data", "leer.txt"), b"")
-    os.makedirs(os.path.join(root, "leerer ordner"), exist_ok=True)
+    write(os.path.join(root, "data", "empty.txt"), b"")
+    os.makedirs(os.path.join(root, "empty dir"), exist_ok=True)
     for name in sorted(os.listdir(os.path.join(REPO, "legacy-c", "gpk"))):
         if name.endswith((".c", ".h")):
             with open(os.path.join(REPO, "legacy-c", "gpk", name), "rb") as f:
-                src = f.read().replace(b"\r\n", b"\n")      # gleich auf allen Systemen (git autocrlf)
+                src = f.read().replace(b"\r\n", b"\n")      # identical on all systems (git autocrlf)
             write(os.path.join(root, "data", "src", name), src)
-    write(os.path.join(root, "dlc", "mesh kopie.bin"), verts)   # Duplikat mit Leerzeichen im Namen
+    write(os.path.join(root, "dlc", "mesh copy.bin"), verts)   # duplicate with a space in its name
     if not with_system_files:
         return
     bindir = os.path.join(root, "bin")
@@ -71,7 +71,7 @@ def make_tree(root, with_system_files):
         for lib in ["libz.so.1", "liblzma.so.5", "libbz2.so.1.0"]:
             real = os.path.realpath(os.path.join(libdir, lib))
             shutil.copyfile(real, os.path.join(bindir, os.path.basename(real)))
-            if not WIN:                     # Rechte und Symlinks nur bei nativem Linux-Ziel
+            if not WIN:                     # permissions and symlinks only for a native Linux target
                 os.chmod(os.path.join(bindir, os.path.basename(real)), 0o755)
                 os.symlink(os.path.basename(real), os.path.join(bindir, lib))
 
@@ -82,39 +82,39 @@ def compare_trees(a, b):
         rel = os.path.relpath(base, a)
         other = os.path.join(b, rel)
         if not os.path.isdir(other):
-            errors.append(f"Ordner fehlt: {rel}")
+            errors.append(f"directory missing: {rel}")
             continue
         for name in dirs + files:
             pa, pb = os.path.join(base, name), os.path.join(other, name)
             if os.path.islink(pa):
                 if not os.path.islink(pb) or os.readlink(pa) != os.readlink(pb):
-                    errors.append(f"Symlink falsch: {os.path.join(rel, name)}")
+                    errors.append(f"wrong symlink: {os.path.join(rel, name)}")
             elif os.path.isfile(pa):
                 if not os.path.isfile(pb):
-                    errors.append(f"Datei fehlt: {os.path.join(rel, name)}")
+                    errors.append(f"file missing: {os.path.join(rel, name)}")
                     continue
                 with open(pa, "rb") as fa, open(pb, "rb") as fb:
                     if fa.read() != fb.read():
-                        errors.append(f"Inhalt verschieden: {os.path.join(rel, name)}")
+                        errors.append(f"content differs: {os.path.join(rel, name)}")
                 if not WIN and stat.S_IMODE(os.stat(pa).st_mode) != stat.S_IMODE(os.stat(pb).st_mode):
-                    errors.append(f"Rechte verschieden: {os.path.join(rel, name)}")
+                    errors.append(f"permissions differ: {os.path.join(rel, name)}")
     for base, dirs, files in os.walk(b):
         rel = os.path.relpath(base, b)
         for name in dirs + files:
             if not os.path.lexists(os.path.join(a, rel, name)):
-                errors.append(f"Zusätzlich: {os.path.join(rel, name)}")
+                errors.append(f"extra: {os.path.join(rel, name)}")
     return errors
 
 
 def run(gpk, *args, check=True):
     r = subprocess.run([*RUNNER, gpk, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and r.returncode != 0:
-        sys.exit(f"FEHLER: gpk {' '.join(args)} -> Exit {r.returncode}\n{r.stdout}{r.stderr}")
+        sys.exit(f"ERROR: gpk {' '.join(args)} -> exit {r.returncode}\n{r.stdout}{r.stderr}")
     return r
 
 
 def fail(msg):
-    sys.exit(f"FEHLER: {msg}")
+    sys.exit(f"ERROR: {msg}")
 
 
 def main():
@@ -130,7 +130,7 @@ def main():
         make_tree(os.path.abspath(a.make_tree), True)
         return
     if not a.gpk:
-        ap.error("gpk-Programm fehlt")
+        ap.error("gpk program missing")
     if a.wine:
         WIN, RUNNER = True, ["wine"]
     gpk = os.path.abspath(a.gpk)
@@ -139,9 +139,9 @@ def main():
         if a.cross_pack:
             make_tree(build, False)
             log = run(gpk, "c", "-t", "2", build, os.path.abspath(a.cross_pack)).stderr
-            if "(Text-CM)" not in log or "JPEG-Rekompression: 1" not in log or "PNG-Rekompression: 1" not in log:
-                fail("Systemwechsel-Archiv deckt Text-Kern, JPEG und PNG nicht ab:\n" + log)
-            print(f"Archiv für den Systemwechsel-Test erzeugt: {a.cross_pack}")
+            if "(text CM)" not in log or "JPEG recompression: 1" not in log or "PNG recompression: 1" not in log:
+                fail("cross-platform archive does not cover the text core, JPEG and PNG:\n" + log)
+            print(f"archive for the cross-platform test created: {a.cross_pack}")
             return
         if a.cross_extract:
             make_tree(build, False)
@@ -149,8 +149,8 @@ def main():
             run(gpk, "x", os.path.abspath(a.cross_extract), out)
             errs = compare_trees(build, out)
             if errs:
-                fail("Fremdes Archiv nicht bitgenau entpackt:\n  " + "\n  ".join(errs))
-            print("Systemwechsel-Test OK: fremdes Archiv bitgenau entpackt")
+                fail("foreign archive not unpacked bit-exactly:\n  " + "\n  ".join(errs))
+            print("cross-platform test OK: foreign archive unpacked bit-exactly")
             return
 
         make_tree(build, True)
@@ -161,23 +161,23 @@ def main():
         print(run(gpk, "x", "-t", "2", arch, out).stderr)
         errs = compare_trees(build, out)
         if errs:
-            fail("Entpacktes weicht ab:\n  " + "\n  ".join(errs))
-        if "PNG-Rekompression: 1" not in log:
-            fail("PNG-Rekompression war nicht aktiv")
-        if "(Text-CM)" not in log:
-            fail("Text-Kern (Context Mixing) wurde nicht benutzt")
-        if "JPEG-Rekompression: 1" not in log:
-            fail("JPEG-Rekompression war nicht aktiv")
+            fail("unpacked tree differs:\n  " + "\n  ".join(errs))
+        if "PNG recompression: 1" not in log:
+                fail("PNG recompression was not active")
+        if "(text CM)" not in log:
+            fail("text core (context mixing) was not used")
+        if "JPEG recompression: 1" not in log:
+                fail("JPEG recompression was not active")
         if "x86-bcj" not in log and "x86-split" not in log:
-            fail("x86-Filter war nicht aktiv")
+            fail("x86 filter was not active")
 
         data = bytearray(open(arch, "rb").read())
         data[len(data) // 2] ^= 0xFF
         bad = os.path.join(w, "kaputt.gpk")
         open(bad, "wb").write(data)
         if run(gpk, "x", bad, os.path.join(w, "out2"), check=False).returncode == 0:
-            fail("Beschädigtes Archiv wurde nicht erkannt")
-        print(f"Rauchtest OK: {os.path.getsize(arch)} Bytes Archiv")
+            fail("corrupted archive was not detected")
+        print(f"smoke test OK: {os.path.getsize(arch)} bytes archive")
 
 
 if __name__ == "__main__":

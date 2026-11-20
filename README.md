@@ -1,96 +1,98 @@
-# Kompression für Computerspiele
+# Compression for computer games
 
-**GPK** packt einen kompletten Spiel-Build für den Download: Deduplizierung,
-dateitypspezifische Filter (x86-Code, DDS-Texturen, Meshes, Audio), verlustfreie PNG- und
-JPEG-Rekompression, eigene Kerne LZRC (LZ) und TCM (Context Mixing für Text), paralleles
-Entpacken mit CRC-Prüfung. Details: [docs/GPK.md](docs/GPK.md).
+**GPK** packs a complete game build for download: deduplication, file-type-specific filters
+(x86 code, DDS textures, meshes, audio), lossless PNG and JPEG recompression, its own cores
+LZRC (LZ) and TCM (context mixing for text), and parallel unpacking with CRC checks.
+Details: [docs/GPK.md](docs/GPK.md).
 
-Das Programm ist in **Rust** geschrieben (`src/`). Die frühere C-Version liegt als Referenz
-in `legacy-c/` (inkl. GLZ, dem Laufzeit-Asset-Kompressor, siehe [docs/GLZ.md](docs/GLZ.md)).
-Rust- und C-Version verwenden dasselbe Archivformat und entpacken die Archive der jeweils
-anderen; die Kerne (Filter, LZRC, TCM, PNG, JPEG) sind bytegleich, das prüft die CI bei jedem Push.
+The program is written in **Rust** (`src/`). The former C version is kept as a reference in
+`legacy-c/` (including GLZ, the runtime asset compressor, see [docs/GLZ.md](docs/GLZ.md)).
+The Rust and C versions use the same archive format and unpack each other's archives; the
+kernels (filters, LZRC, TCM, PNG, JPEG) are byte-identical, which CI checks on every push.
 
-## Kernergebnis (Test-Build 327,6 MB inkl. JPEGs)
+## Key result (test build 327.6 MB incl. JPEGs)
 
-| Verfahren | Größe nachher | Differenz | Packen | Entpacken (4 Threads) |
+| Method | Size after | Difference | Pack | Unpack (4 threads) |
 |---|---:|---:|---:|---:|
-| zip -9 | 187,2 MB | −42,9 % | 40,0 s | 3,1 s |
-| tar + zstd -19 --long=27 | 162,8 MB | −50,3 % | 191,8 s | 0,9 s |
-| tar + xz -9e | 149,2 MB | −54,5 % | 311,1 s | 7,3 s |
-| GPK v3 `--no-cm` | 126,3 MB | −61,5 % | 100,6 s | 4,1 s |
-| **GPK v3** | **125,5 MB** | **−61,7 %** | 118,5 s | 9,9 s |
+| zip -9 | 187.2 MB | −42.9 % | 40.0 s | 3.1 s |
+| tar + zstd -19 --long=27 | 162.8 MB | −50.3 % | 191.8 s | 0.9 s |
+| tar + xz -9e | 149.2 MB | −54.5 % | 311.1 s | 7.3 s |
+| GPK v3 `--no-cm` | 126.3 MB | −61.5 % | 100.6 s | 4.1 s |
+| **GPK v3** | **125.5 MB** | **−61.7 %** | 118.5 s | 9.9 s |
 
-Details, Ablationen und Abwägungen: [docs/GPK.md](docs/GPK.md) und [docs/vergleich.md](docs/vergleich.md).
-Der Test-Build ist teilweise synthetisch (Code, Skripte, Schriften sind echte Dateien).
+Details, ablations and trade-offs: [docs/GPK.md](docs/GPK.md) and
+[docs/comparison.md](docs/comparison.md). The test build is partly synthetic (code, scripts and
+fonts are real files).
 
-## Rust-Version: Port und Optimierung (Test-Build 308 MB, 4 Threads)
+## Rust version: port and optimization (test build 308 MB, 4 threads)
 
-| | Rust-Port (Archive bytegleich zu C) | Rust optimiert |
+| | Rust port (archives byte-identical to C) | Rust optimized |
 |---|---:|---:|
-| Archiv | 120,27 MB | 120,28 MB (+0,01 %) |
-| Packen | 92,8 s, 1,46 GB RAM | **64,3 s**, 1,67 GB RAM |
-| Entpacken | 8,3 s, 0,44 GB RAM | **6,8 s**, 0,61 GB RAM |
+| Archive | 120.27 MB | 120.28 MB (+0.01 %) |
+| Pack | 92.8 s, 1.46 GB RAM | **64.3 s**, 1.67 GB RAM |
+| Unpack | 8.3 s, 0.44 GB RAM | **6.8 s**, 0.61 GB RAM |
 
-Beide Spalten direkt hintereinander gemessen. Der reine Port war so schnell wie die C-Version
-(in einer früheren Messung Packen 104,7 s gegenüber 104,3 s).
-Was optimiert wurde und was nicht geholfen hat: [docs/GPK.md](docs/GPK.md#geschwindigkeit-rust-version).
+Both columns were measured back to back. The plain port was as fast as the C version
+(in an earlier measurement packing took 104.7 s vs. 104.3 s).
+What was optimized and what did not help: [docs/GPK.md](docs/GPK.md#speed-rust-version).
 
-## Schnellstart
+## Quick start
 
 ```bash
 cargo build --release
-python3 tools/make_build.py testbuild/MyGame        # Test-Build erzeugen (~330 MB, JPEGs brauchen Pillow)
-target/release/gpk c -t 4 testbuild/MyGame spiel.gpk
-target/release/gpk x -t 4 spiel.gpk entpackt
-target/release/gpk l spiel.gpk
+python3 tools/make_build.py testbuild/MyGame        # create a test build (~330 MB, JPEGs need Pillow)
+target/release/gpk c -t 4 testbuild/MyGame game.gpk
+target/release/gpk x -t 4 game.gpk unpacked
+target/release/gpk l game.gpk
 ```
 
-Benötigt: nur Rust (stable). Der Standard-Build enthält keinen C-Code; einzige Abhängigkeit ist
-`crc32fast` (reines Rust). Optional `--features xz` für den Vergleichskern `--xz` (liblzma, braucht
-einen C-Compiler).
-Optionen: `gpk` ohne Argumente zeigt die Hilfe; `--max-ram GB` begrenzt den Speicherbedarf.
+Requirements: only Rust (stable). The default build contains no C code; its only dependency is
+`crc32fast` (pure Rust). Optionally `--features xz` for the comparison core `--xz` (liblzma, needs
+a C compiler).
+Options: `gpk` without arguments shows the help; `--max-ram GB` limits the memory usage.
 
-## Sicherheit
+## Security
 
-- Der gesamte Code ist sicheres Rust: `unsafe` ist in der Bibliothek per `#![forbid(unsafe_code)]`
-  verboten (Ausnahme nur das Test-Feature `cref`, das die C-Referenz und die echte zlib zum
-  Vergleich einbindet). Die PNG-Rekompression nutzt eine eigene Deflate-Implementierung, die
-  bitgenau dieselben Ströme wie zlib 1.4 erzeugt (siehe unten).
-- Archive werden vor dem Entpacken vollständig geprüft: Pfade (keine absoluten Pfade, kein `..`,
-  unter Windows kein `\` oder `:`), Größen und Grenzen aller Blöcke und Stücke. Beschädigte Daten
-  führen zu einer Fehlermeldung, nie zu einem Absturz oder Schreiben außerhalb des Zielordners;
-  jede Datei wird per CRC32 geprüft.
-- Absolute Symlinks werden beim Entpacken übersprungen.
+- All code is safe Rust: `unsafe` is forbidden in the library via `#![forbid(unsafe_code)]`
+  (the only exception is the test feature `cref`, which links the C reference and the real
+  zlib for comparison). PNG recompression uses its own Deflate implementation that produces
+  bit-exactly the same streams as zlib 1.4 (see below).
+- Archives are fully validated before unpacking: paths (no absolute paths, no `..`, on Windows
+  no `\` or `:`), sizes and bounds of all blocks and pieces. Corrupted data leads to an error
+  message, never to a crash or to writing outside the target directory; every file is checked
+  with CRC32.
+- Absolute symlinks are skipped when unpacking.
 
-## Eigene Algorithmen statt Bibliotheken
+## Own algorithms instead of libraries
 
-| Bibliothek | ersetzt durch | Ergebnis |
+| Library | replaced by | Result |
 |---|---|---|
-| zlib (C) für die PNG-Rekompression | `src/deflate.rs`, `src/inflate.rs`: Deflate bitgenau wie zlib 1.4 (Stufen 1–9, memLevel 1–9, Strategien default/filtered), eigener Inflater | gleich schnell wie zlib (Deflate 97–103 %, Inflate 90–106 %); die Parametersuche vergleicht laufend und bricht beim ersten abweichenden Block ab: **PNG-Suche 1,9–3,9× schneller**; Windows-.exe 18 % kleiner |
-| liblzma (C) für `--xz` | LZRC (eigener Kern, gab es schon) | nur noch optional (`--features xz`), LZRC packt kleiner und schneller |
-| crc32fast (Rust) | – | bleibt: nutzt die CPU-Befehle für Carry-less-Multiplikation, 12 GB/s gegenüber 2 GB/s der besten sicheren Eigenimplementierung (Slicing-by-16) |
+| zlib (C) for PNG recompression | `src/deflate.rs`, `src/inflate.rs`: Deflate bit-exact with zlib 1.4 (levels 1–9, memLevel 1–9, strategies default/filtered), own inflater | as fast as zlib (Deflate 97–103 %, Inflate 90–106 %); the parameter search compares continuously and stops at the first differing block: **PNG search 1.9–3.9× faster**; Windows .exe 18 % smaller |
+| liblzma (C) for `--xz` | LZRC (own core, already existed) | only optional now (`--features xz`); LZRC packs smaller and faster |
+| crc32fast (Rust) | – | kept: uses the CPU's carry-less multiplication instructions, 12 GB/s vs. 2 GB/s for the best safe own implementation (slicing-by-16) |
 
-Bitgenauigkeit wird in der CI gegen die echte zlib geprüft: 702 Parameter-Kombinationen auf
-Text, Zufall, Bild-, Null- und Strukturdaten (inkl. Fensterverschiebungen, gespeicherter Blöcke,
-weit entfernter Matches) sowie 8100 beschädigte Ströme, die der Inflater genau wie zlib
-annehmen bzw. ablehnen muss. Die Archive sind bytegleich zum Stand mit zlib.
+Bit-exactness is checked in CI against the real zlib: 702 parameter combinations on text,
+random, image, zero and structured data (including window slides, stored blocks and distant
+matches), plus 8100 corrupted streams that the inflater must accept or reject exactly like
+zlib. The archives are byte-identical to the version that used zlib.
 
 ## Tests
 
 ```bash
-cargo test --release                       # Unit-Tests (Roundtrips, beschädigte Daten)
-cargo test --release --features cref       # zusätzlich Differenztests: Rust == C, Byte für Byte
+cargo test --release                       # unit tests (round trips, corrupted data)
+cargo test --release --features cref,xz    # plus differential tests: Rust == C, byte for byte
 python3 ci/smoke_test.py target/release/gpk
 ```
 
-Die Differenztests übersetzen die C-Module aus `legacy-c/` mit und vergleichen jede Stufe
-(Filter, GLZ, LZRC, TCM, Pixel-Coder, PNG, JPEG) mit der Rust-Version.
-Mit `GPK_PNG_DIR`/`GPK_JPEG_DIR` lassen sich weitere Testbilder einbinden
-(`tools/gen_testimages.py` erzeugt welche, braucht Pillow).
+The differential tests compile the C modules from `legacy-c/` and compare every stage
+(filters, GLZ, LZRC, TCM, pixel coder, PNG, JPEG, Deflate/Inflate) with the Rust version.
+More test images can be added with `GPK_PNG_DIR`/`GPK_JPEG_DIR`
+(`tools/gen_testimages.py` creates some, needs Pillow).
+`GPK_TIMINGS=1 gpk …` prints phase timings when packing and per-block timings when unpacking.
 
 ## Windows
 
-`gpk.exe` wird unter Linux per Cross-Compiling gebaut (keine Windows-VM nötig):
+`gpk.exe` is cross-compiled on Linux (no Windows VM needed):
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
@@ -99,32 +101,31 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
   cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-Gegenüber der C-Version hat die Rust-`.exe` denselben Funktionsumfang wie unter Linux
-und unterstützt Unicode-Dateinamen. Archive sind zwischen Linux und Windows
-austauschbar; unter Windows werden Symlinks übersprungen und Unix-Rechte nicht gesetzt.
+Compared to the C version, the Rust `.exe` has the same features as on Linux and supports
+Unicode file names. Archives can be exchanged between Linux and Windows; on Windows symlinks
+are skipped and Unix permissions are not set.
 
 ## CI
 
-`.github/workflows/build.yml` läuft bei jedem Push auf `main` und `rust-port` und bei Pull Requests,
-ausschließlich auf Ubuntu-Runnern (keine Windows-VM):
+`.github/workflows/build.yml` runs on every push to `main` and `rust-port` and on pull
+requests, exclusively on Ubuntu runners (no Windows VM):
 
-- **Linux:** `cargo fmt`/`clippy`, Tests und Differenztests gegen die C-Referenz und die echte
-  zlib, Prüfung „kein C-Code im Standard-Build“, optionaler xz-Kern, Tests im
-  Debug-Modus (Überlaufprüfungen), Rauchtest (packen, entpacken, bitgenau vergleichen,
-  beschädigtes Archiv muss abgelehnt werden), gleiche Archive bei 1 und 4 Threads,
-  Kreuz-Entpacken C ↔ Rust
-- **Windows-.exe:** Cross-Build, Unit- und Rauchtests der `.exe` unter Wine,
-  Archiv-Austausch Linux → Windows und Windows → Linux
-- Die fertigen Programme (`gpk`, `gpk.exe`) stehen als Artefakte am jeweiligen Lauf.
+- **Linux:** `cargo fmt`/`clippy`, tests and differential tests against the C reference and the
+  real zlib, check "no C code in the default build", optional xz core, tests in debug mode
+  (overflow checks), smoke test (pack, unpack, compare bit-exactly, a corrupted archive must be
+  rejected), identical archives with 1 and 4 threads, cross-unpacking C ↔ Rust
+- **Windows .exe:** cross build, unit and smoke tests of the `.exe` under Wine, archive exchange
+  Linux → Windows and Windows → Linux
+- The finished programs (`gpk`, `gpk.exe`) are available as artifacts of each run.
 
 ## Releases
 
-Fertige Programme erscheinen automatisch unter *Releases*, sobald alle Builds und Tests grün sind:
+Finished programs appear automatically under *Releases* once all builds and tests are green:
 
 ```bash
-git tag v0.4.0 && git push origin v0.4.0     # legt den Release an und hängt die Dateien an
+git tag v0.4.0 && git push origin v0.4.0     # creates the release and attaches the files
 ```
 
-Alternativ einen Release in der GitHub-Oberfläche veröffentlichen – die Pipeline hängt die
-Dateien dann an diesen Release an. Angehängt werden `gpk-<version>-linux-x86_64.tar.gz`,
-`gpk-<version>-windows-x86_64.zip` und `SHA256SUMS.txt`.
+Alternatively, publish a release in the GitHub UI – the pipeline then attaches the files to that
+release. Attached are `gpk-<version>-linux-x86_64.tar.gz`, `gpk-<version>-windows-x86_64.zip`
+and `SHA256SUMS.txt`.

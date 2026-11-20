@@ -1,10 +1,10 @@
-//! GLZ – schneller blockweiser LZ77+Huffman-Kompressor (Port von `legacy-c/glz.c`).
+//! GLZ – fast block-wise LZ77+Huffman compressor (port of `legacy-c/glz.c`).
 //!
-//! GPK nutzt GLZ als schnellen Schätzer („ist das schon komprimiert?“).
-//! Format und Ausgabe sind bytegleich zur C-Referenz.
+//! GPK uses GLZ as a fast estimator ("is this already compressed?").
+//! Format and output are byte-identical to the C reference.
 //!
-//! Containerformat: `"GLZ1" | u64 Originalgröße | Blöcke`;
-//! Block: `u8 filter | u8 stride | u8 mode (0=roh, 1=LZ) | u32 roh | u32 payload | payload`.
+//! Container format: `"GLZ1" | u64 original size | blocks`;
+//! block: `u8 filter | u8 stride | u8 mode (0=raw, 1=LZ) | u32 raw | u32 payload | payload`.
 
 use crate::filters::{self, FSpec, FT_DELTA, FT_NONE, FT_SHUF, FT_SHUFDELTA};
 
@@ -27,7 +27,7 @@ fn bitlen32(v: u32) -> u32 {
     31 - v.leading_zeros()
 }
 
-// ---------------- Bit-I/O (LSB zuerst) ----------------
+// ---------------- Bit I/O (LSB first) ----------------
 struct BitWriter {
     out: Vec<u8>,
     acc: u64,
@@ -94,7 +94,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-// ---------------- Kanonisches Huffman, max. 11 Bit ----------------
+// ---------------- Canonical Huffman, max. 11 bits ----------------
 fn huf_build_lengths(freq_in: &[u32; 256], len: &mut [u8; 256]) {
     let mut f = *freq_in;
     loop {
@@ -161,7 +161,7 @@ fn huf_build_lengths(freq_in: &[u32; 256], len: &mut [u8; 256]) {
         }
         for v in f.iter_mut() {
             if *v != 0 {
-                *v = (*v + 1) >> 1; // abflachen, neu bauen
+                *v = (*v + 1) >> 1; // flatten, rebuild
             }
         }
     }
@@ -176,7 +176,7 @@ fn rev_bits(mut v: u32, n: u32) -> u32 {
     r
 }
 
-/// Kanonische Codes (bitgespiegelt für LSB-zuerst); `None` bei verletzter Kraft-Ungleichung.
+/// Canonical codes (bit-reversed for LSB first); `None` if the Kraft inequality is violated.
 fn huf_codes(len: &[u8; 256]) -> Option<[u32; 256]> {
     let mut cnt = [0u32; 16];
     for &l in len.iter() {
@@ -207,7 +207,7 @@ fn huf_codes(len: &[u8; 256]) -> Option<[u32; 256]> {
     Some(code)
 }
 
-/// Stream: `mode | u32 count | ...` mit mode 0 = roh, 1 = RLE, 2 = Huffman.
+/// Stream: `mode | u32 count | ...` with mode 0 = raw, 1 = RLE, 2 = Huffman.
 fn huf_encode(src: &[u8], dst: &mut Vec<u8>) {
     let n = src.len() as u32;
     let mut freq = [0u32; 256];
@@ -249,7 +249,7 @@ fn huf_encode(src: &[u8], dst: &mut Vec<u8>) {
     dst.extend_from_slice(src);
 }
 
-/// Dekodiert einen Stream ab `p`; liefert (Daten, neue Position).
+/// Decodes a stream starting at `p`; returns (data, new position).
 fn huf_decode(d: &[u8], mut p: usize, maxn: usize) -> Option<(Vec<u8>, usize)> {
     if d.len() < p + 5 {
         return None;
@@ -286,7 +286,7 @@ fn huf_decode(d: &[u8], mut p: usize, maxn: usize) -> Option<(Vec<u8>, usize)> {
                 return None;
             }
             let code = huf_codes(&len)?;
-            let mut tab = vec![1u16; HUF_TABSIZE]; // Lücken (korrupte Daten): harmlos
+            let mut tab = vec![1u16; HUF_TABSIZE]; // gaps (corrupt data): harmless
             for s in 0..256 {
                 let l = len[s] as usize;
                 if l == 0 {
@@ -319,7 +319,7 @@ fn huf_decode(d: &[u8], mut p: usize, maxn: usize) -> Option<(Vec<u8>, usize)> {
     }
 }
 
-// ---------------- Entropie-Hilfen (nur Encoder) ----------------
+// ---------------- Entropy helpers (encoder only) ----------------
 fn delta_entropy(p: &[u8], s: usize) -> f64 {
     let mut h = [0u32; 256];
     for i in s..p.len() {
@@ -385,7 +385,7 @@ struct Enc {
 
 #[inline]
 fn match_len(d: &[u8], a: usize, b: usize) -> u32 {
-    // Anzahl gleicher Bytes ab a und b (b < a), bis zum Ende von d
+    // Number of equal bytes starting at a and b (b < a), up to the end of d
     let n = d.len() - a;
     let (x, y) = (&d[a..], &d[b..b + n]);
     let mut i = 0;
@@ -463,7 +463,7 @@ impl Enc {
         }
     }
 
-    /// Komprimiert einen (gefilterten) Block zur LZ-Payload.
+    /// Compresses a (filtered) block into the LZ payload.
     fn lz_block(&mut self, src: &[u8], level: usize) -> Vec<u8> {
         let lp = LEVELS[level];
         let n = src.len() as u32;
@@ -502,7 +502,7 @@ impl Enc {
                         break;
                     }
                 }
-                // Sequenz ausgeben
+                // Emit the sequence
                 let ll = ip - anchor;
                 lit.extend_from_slice(&src[anchor as usize..ip as usize]);
                 let mm = m.len - MINMATCH;
@@ -545,7 +545,7 @@ impl Enc {
         out
     }
 
-    /// Stride-Erkennung + Probekompression: besten Filter wählen.
+    /// Stride detection + trial compression: choose the best filter.
     fn choose_filter(&mut self, src: &[u8]) -> (u8, u8) {
         let n = src.len();
         if n < 4096 {
@@ -592,7 +592,7 @@ pub fn bound(n: usize) -> usize {
     FILE_HDR + n + (n / BLOCK_SIZE + 1) * BLK_HDR + 64
 }
 
-/// Komprimiert `src` (Stufe 1..9). `no_filter`: Vorfilter-Auswahl abschalten.
+/// Compresses `src` (level 1..9). `no_filter`: disable the pre-filter selection.
 pub fn compress(src: &[u8], level: i32, no_filter: bool) -> Vec<u8> {
     let level = level.clamp(1, 9) as usize;
     let mut out = Vec::with_capacity(src.len() / 2 + 64);
@@ -726,7 +726,7 @@ pub fn decompressed_size(src: &[u8]) -> Option<usize> {
     usize::try_from(u64::from_le_bytes(src[4..12].try_into().unwrap())).ok()
 }
 
-/// Dekomprimiert; `None` bei ungültigen Daten oder `max_out` überschritten.
+/// Decompresses; `None` on invalid data or if `max_out` is exceeded.
 pub fn decompress(src: &[u8], max_out: usize) -> Option<Vec<u8>> {
     let total = decompressed_size(src)?;
     if total > max_out {
@@ -780,7 +780,7 @@ mod tests {
     use crate::testutil::Rng;
 
     fn sample(r: &mut Rng, n: usize) -> Vec<u8> {
-        let words = [b"Drache ".as_slice(), b"Schwert ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f"];
+        let words = [b"dragon ".as_slice(), b"sword ", b"{\"id\": 42}, ", b"\x00\x00\x80\x3f"];
         let mut v = Vec::with_capacity(n);
         while v.len() < n {
             if r.next() % 4 == 0 {

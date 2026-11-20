@@ -1,4 +1,4 @@
-//! PNG-Rekompression messen: pngbench <ordner mit .png>
+//! Measure PNG recompression: pngbench <directory with .png files>
 use std::time::Instant;
 fn main() {
     let dir = std::env::args().nth(1).unwrap();
@@ -22,5 +22,5 @@ fn main() {
             outs.push(t1.len());
         }
     }
-    println!("{} PNGs ({:.1} MB), {} umkehrbar | Suche {:.2} s, Rückweg {:.2} s", files.len(), bytes as f64 / 1e6, ok, tf, ti);
+    println!("{} PNGs ({:.1} MB), {} reversible | search {:.2} s, inverse {:.2} s", files.len(), bytes as f64 / 1e6, ok, tf, ti);
 }

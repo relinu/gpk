@@ -1,4 +1,4 @@
-//! Kerne Rust gegen C messen: `cargo run --release --features cref --example prof -- <build-ordner>`
+//! Measure kernels, Rust vs. C: `cargo run --release --features cref --example prof -- <build-dir>`
 use gpk::cref::*;
 use gpk::{lzrc, tcm};
 use std::time::Instant;
@@ -25,7 +25,7 @@ fn t<R>(f: impl FnOnce() -> R) -> (R, f64) {
 }
 
 fn main() {
-    let root = std::path::PathBuf::from(std::env::args().nth(1).expect("Build-Ordner"));
+    let root = std::path::PathBuf::from(std::env::args().nth(1).expect("build directory"));
     let level: i32 = std::env::args().nth(2).map(|s| s.parse().unwrap()).unwrap_or(9);
     let mut exe = std::fs::read(root.join("MyGame.x86_64")).unwrap();
     exe.truncate(12 << 20);
@@ -47,13 +47,13 @@ fn main() {
         let (_, rd) = t(|| lzrc::decompress(&rz, &mut out));
         let (_, cd) = t(|| unsafe { lzrc_decompress(cbuf.as_ptr(), cn, out.as_mut_ptr(), d.len()) });
         println!(
-            "{name:5} {mb:5.1} MB  LZRC{level} {:6.2} MB | packen R {:5.2} MB/s C {:5.2} MB/s | entpacken R {:6.1} MB/s C {:6.1} MB/s{}",
+            "{name:5} {mb:5.1} MB  LZRC{level} {:6.2} MB | pack R {:5.2} MB/s C {:5.2} MB/s | unpack R {:6.1} MB/s C {:6.1} MB/s{}",
             rz.len() as f64 / 1e6,
             mb / rt,
             mb / ct,
             mb / rd,
             mb / cd,
-            if rz.len() == cn { "" } else { "  (GRÖSSE ABWEICHEND)" }
+            if rz.len() == cn { "" } else { "  (SIZE DIFFERS)" }
         );
         if name == "text" {
             let (tz, rt) = t(|| tcm::compress(d));
@@ -62,7 +62,7 @@ fn main() {
             let (_, rd) = t(|| tcm::decompress(&tz, &mut out));
             let (_, cd) = t(|| unsafe { tcm_decompress(tb.as_ptr(), tn, out.as_mut_ptr(), d.len()) });
             println!(
-                "{name:5} {mb:5.1} MB  TCM    {:6.2} MB | packen R {:5.2} MB/s C {:5.2} MB/s | entpacken R {:6.1} MB/s C {:6.1} MB/s",
+                "{name:5} {mb:5.1} MB  TCM    {:6.2} MB | pack R {:5.2} MB/s C {:5.2} MB/s | unpack R {:6.1} MB/s C {:6.1} MB/s",
                 tz.len() as f64 / 1e6,
                 mb / rt,
                 mb / ct,

@@ -1,9 +1,9 @@
-//! TCM – Context-Mixing-Kern für Text (Port von `legacy-c/gpk/tcm.c`, bytegleich).
+//! TCM – context-mixing core for text (port of `legacy-c/gpk/tcm.c`, byte-identical).
 //!
-//! Bitweise Vorhersage aus Ordnung 0–4 und 6, Wort-, Spalten- und Match-Modell,
-//! zwei Mischnetze, zwei APM-Stufen, binärer Arithmetik-Coder. Nur Ganzzahlen.
+//! Bitwise prediction from orders 0–4 and 6, word, column and match models,
+//! two mixers, two APM stages, binary arithmetic coder. Integers only.
 
-const NHASH: usize = 7; // o1 o2 o3 o4 o6 Wort Spalte
+const NHASH: usize = 7; // o1 o2 o3 o4 o6 word column
 const NIN: usize = NHASH + 3; // + o0, Match, Bias
 const HBITS: u32 = 22;
 const LR: i32 = 2;
@@ -15,7 +15,7 @@ const SQ: [i32; 33] = [
     1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068,
     4079, 4085, 4089, 4092, 4093, 4094,
 ];
-/// squash(d) = 4096 / (1 + e^(-d/256)), ganzzahlig (Stützstellen + Interpolation).
+/// squash(d) = 4096 / (1 + e^(-d/256)), in integers (support points + interpolation).
 #[inline]
 fn squash(d: i32) -> i32 {
     if d > 2047 {
@@ -78,7 +78,7 @@ struct Apm {
     idx: usize,
 }
 impl Apm {
-    /// Tabelle für `n` Kontexte; ein vorhandener Puffer wird wiederverwendet.
+    /// Table for `n` contexts; an existing buffer is reused.
     fn with_buffer(mut t: Vec<u16>, n: usize) -> Self {
         let mut row = [0u16; 33];
         for (j, r) in row.iter_mut().enumerate() {
@@ -147,8 +147,8 @@ struct Model {
     pos: u32,
 }
 
-/// Große Puffer eines Modells (~125 MB), werden je Thread wiederverwendet:
-/// spart das Anfordern und die Seitenfehler bei jedem Block.
+/// Large buffers of a model (~125 MB), reused per thread:
+/// saves the allocation and the page faults for every block.
 struct Buffers {
     ht: Vec<Vec<u32>>,
     mmt: Vec<u32>,
@@ -158,7 +158,7 @@ impl Buffers {
     fn new() -> Self {
         Buffers { ht: (0..NHASH).map(|_| vec![0u32; 1 << HBITS]).collect(), mmt: vec![0u32; 1 << MMBITS], a2: Vec::new() }
     }
-    /// Gebrauchte Puffer auf den Anfangszustand zurücksetzen.
+    /// Reset used buffers to the initial state.
     fn cleared(mut self) -> Self {
         for t in &mut self.ht {
             t.fill(0);
@@ -172,7 +172,7 @@ thread_local! {
     static CACHE: std::cell::RefCell<Option<Buffers>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Führt `f` mit einem frischen Modell aus; die großen Puffer kommen aus dem Thread-Cache.
+/// Runs `f` with a fresh model; the large buffers come from the thread cache.
 fn with_model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
     let bufs = CACHE.with(|c| c.borrow_mut().take()).map(Buffers::cleared).unwrap_or_else(Buffers::new);
     let mut m = Model::new(bufs);
@@ -220,8 +220,8 @@ impl Model {
         m
     }
 
-    /// Slots (16 Einträge, Eintrag 0 = Prüfsumme) für das aktuelle Nibble wählen;
-    /// zwei Kandidaten je Kontext, ggf. den mit weniger Erfahrung ersetzen.
+    /// Choose the slots (16 entries, entry 0 = check value) for the current nibble;
+    /// two candidates per context, replace the one with less experience if needed.
     fn select_slots(&mut self) {
         let nib = if self.bitpos == 0 { 0 } else { (self.c0 & 15) | 16 };
         for k in 0..NHASH {
@@ -244,7 +244,7 @@ impl Model {
         self.o0slot = if nib == 0 { 0 } else { ((nib & 15) + 1) as usize * 16 };
     }
 
-    /// An der Bytegrenze: Kontexte für das nächste Byte (buf = alle bisherigen Bytes).
+    /// At a byte boundary: contexts for the next byte (buf = all bytes so far).
     fn byte_update(&mut self, c: u8, buf: &[u8]) {
         let cc = c as u32;
         self.c4 = (self.c4 << 8) | cc;
@@ -263,7 +263,7 @@ impl Model {
         self.hctx[3] = hash2(4, c4);
         self.hctx[4] = hash2(hash2(6, c4), if pos >= 6 { buf[pos - 5] as u32 | (buf[pos - 6] as u32) << 8 } else { 0 });
         self.hctx[5] = hash2(hash2(7, self.word0), self.word1.wrapping_add(if letter { 0 } else { cc }));
-        // Spalte + Zeichen in der Zeile darüber
+        // Column + character in the line above
         if c == b'\n' {
             self.above = self.linestart;
             self.linestart = self.pos;
@@ -274,7 +274,7 @@ impl Model {
         let prevline = self.above;
         let ab = if prevline.wrapping_add(self.col) < self.linestart { buf[(prevline + self.col) as usize] as u32 } else { 0 };
         self.hctx[6] = hash2(hash2(8, self.col.min(64)), ab | (cc << 8));
-        // Match-Modell
+        // Match model
         if self.mlen != 0 && buf[self.mptr as usize] == c {
             self.mlen += 1;
             self.mptr += 1;
@@ -413,8 +413,8 @@ fn compress_with(m: &mut Model, src: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Dekodiert genau `out.len()` Bytes. Beschädigte Daten liefern falsche Bytes
-/// (die CRC-Prüfung erkennt das), aber nie einen Speicherfehler.
+/// Decodes exactly `out.len()` bytes. Corrupted data yields wrong bytes
+/// (the CRC check detects that), but never a memory error.
 pub fn decompress(src: &[u8], out: &mut [u8]) {
     with_model(|m| decompress_with(m, src, out))
 }
@@ -443,7 +443,7 @@ fn decompress_with(m: &mut Model, src: &[u8], out: &mut [u8]) {
             }
             c = (c << 1) | bit as u32;
             if b == 7 {
-                out[i] = c as u8; // Byte steht, bevor das Modell es liest
+                out[i] = c as u8; // the byte is stored before the model reads it
             }
             m.update(bit, &out[..i + (b == 7) as usize]);
             while (x1 ^ x2) & 0xFF00_0000 == 0 {
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let text = "Der Drache bewacht das Schwert.\n  {\"key\": 42, \"name\": \"Burg\"}\n".repeat(400);
+        let text = "The dragon guards the sword.\n  {\"key\": 42, \"name\": \"castle\"}\n".repeat(400);
         for d in [Vec::new(), b"a".to_vec(), text.into_bytes(), Rng::new(1).bytes(30_000)] {
             let c = compress(&d);
             let mut out = vec![0u8; d.len()];
@@ -471,9 +471,9 @@ mod tests {
         }
     }
     #[test]
-    fn wiederverwendung_deterministisch() {
-        // Gleiche Eingabe nach anderen Blöcken im selben Thread: identische Ausgabe
-        let a = "Erster Block mit Text. ".repeat(3000).into_bytes();
+    fn reuse_is_deterministic() {
+        // Same input after other blocks in the same thread: identical output
+        let a = "First block with text. ".repeat(3000).into_bytes();
         let b = Rng::new(9).bytes(20_000);
         let first = compress(&a);
         let _ = compress(&b);

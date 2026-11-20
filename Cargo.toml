@@ -2,7 +2,7 @@
 name = "gpk"
 version = "0.4.0"
 edition = "2021"
-description = "Download-Packer für Spiel-Builds (verlustfrei, bitgenau, parallel)"
+description = "Download packer for game builds (lossless, bit-exact, parallel)"
 publish = false
 
 [lib]
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 name = "gpk"
 path = "src/main.rs"
 
-# Messwerkzeuge (Rust gegen C-Referenz): cargo run --release --features cref --example prof -- <build>
+# Measurement tools (Rust vs. C reference): cargo run --release --features cref --example prof -- <build>
 [[example]]
 name = "prof"
 required-features = ["cref"]
@@ -27,13 +27,13 @@ name = "zbench"
 required-features = ["cref"]
 
 [dependencies]
-# CRC32 (reines Rust, nutzt die CPU-Befehle für Carry-less-Multiplikation; ~6x schneller als
-# jede sichere Eigenimplementierung)
+# CRC32 (pure Rust, uses the CPU's carry-less multiplication instructions; ~6x faster than
+# any safe own implementation)
 crc32fast = "1"
-# Optional: xz/LZMA2 als Vergleichskern (--xz) über liblzma (C). Nicht im Standard-Build:
-# der eigene Kern LZRC packt kleiner und schneller.
+# Optional: xz/LZMA2 as a comparison core (--xz) via liblzma (C). Not in the default build:
+# the own core LZRC packs smaller and faster.
 xz2 = { version = "0.1", features = ["static"], optional = true }
-# Nur für die Differenztests gegen die C-Referenz und die echte zlib (Feature `cref`)
+# Only for the differential tests against the C reference and the real zlib (feature `cref`)
 libz-sys = { version = "1", default-features = false, features = ["static"], optional = true }
 libc = { version = "0.2", optional = true }
 
@@ -43,7 +43,8 @@ cc = { version = "1", optional = true }
 [features]
 default = []
 xz = ["dep:xz2"]
-# C-Referenzimplementierung (legacy-c/) und echte zlib für Differenztests mitkompilieren
+# Compile the C reference implementation (legacy-c/) and the real zlib for differential tests
+
 cref = ["dep:cc", "dep:libz-sys", "dep:libc"]
 
 [profile.release]

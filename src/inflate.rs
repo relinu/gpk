@@ -1,14 +1,14 @@
-//! Inflate (RFC 1950/1951): zlib-Strom vollständig entpacken, in sicherem Rust.
+//! Inflate (RFC 1950/1951): decompress a complete zlib stream, in safe Rust.
 //!
-//! Lehnt dieselben Fehler ab wie zlib: falscher Kopf, voreingestelltes Wörterbuch,
-//! überbelegte oder (bis auf den Sonderfall eines einzelnen Codes) unvollständige Huffman-Codes,
-//! ungültige Symbole, Distanzen vor den Anfang, falsche Adler-32-Prüfsumme, Daten hinter dem Strom.
+//! Rejects the same errors as zlib: wrong header, preset dictionary, over-subscribed or
+//! (except for the special case of a single code) incomplete Huffman codes, invalid symbols,
+//! distances before the start, wrong Adler-32 checksum, data behind the stream.
 
 const FAST_BITS: u32 = 10;
 
-/// Kanonischer Huffman-Decoder: schnelle Tabelle für kurze Codes, sonst Zählverfahren.
+/// Canonical Huffman decoder: fast table for short codes, otherwise the counting method.
 struct Huff {
-    /// Index = die nächsten FAST_BITS Bits; Wert = Symbol << 4 | Länge (0 = nicht in der Tabelle)
+    /// Index = the next FAST_BITS bits; value = symbol << 4 | length (0 = not in the table)
     fast: Vec<u16>,
     count: [u16; 16],
     symbol: Vec<u16>,
@@ -30,7 +30,7 @@ impl Huff {
         let max = (1..16).rev().find(|&l| count[l] != 0).unwrap_or(0);
         let mut h = Huff { fast: vec![0; 1 << FAST_BITS], count, symbol: vec![0; lengths.len()] };
         if max == 0 {
-            // keine Codes: nur zulässig, solange nichts dekodiert wird (wie zlib)
+            // no codes: only allowed as long as nothing is decoded (like zlib)
             return if kind == Kind::CodeLens { None } else { Some(h) };
         }
         let mut left: i32 = 1;
@@ -38,11 +38,11 @@ impl Huff {
             left <<= 1;
             left -= count[len] as i32;
             if left < 0 {
-                return None; // überbelegt
+                return None; // over-subscribed
             }
         }
         if left > 0 && (kind == Kind::CodeLens || max != 1) {
-            return None; // unvollständig
+            return None; // incomplete
         }
         let mut offs = [0u16; 16];
         for len in 1..15 {
@@ -54,7 +54,7 @@ impl Huff {
                 offs[l as usize] += 1;
             }
         }
-        // schnelle Tabelle: kanonische Codes (MSB zuerst) bitumgekehrt eintragen
+        // fast table: enter the canonical codes (MSB first) bit-reversed
         let mut code = 0u32;
         let mut idx = 0usize;
         for len in 1..=FAST_BITS as usize {
@@ -87,8 +87,8 @@ struct Bits<'a> {
 impl<'a> Bits<'a> {
     #[inline]
     fn refill(&mut self) {
-        // Schneller Weg: 8 Bytes auf einmal. Bits oberhalb von n enthalten dann schon die
-        // folgenden Bytes; ein späteres Nachladen ODER-t dieselben Werte an dieselbe Stelle.
+        // Fast path: 8 bytes at once. Bits above n then already hold the following bytes;
+        // a later refill ORs the same values into the same position.
         if self.pos + 8 <= self.data.len() {
             let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
             self.buf |= v << self.n;
@@ -116,7 +116,7 @@ impl<'a> Bits<'a> {
         self.n -= k;
         v
     }
-    /// Verbrauchte Bytes (inkl. angebrochenem Byte); > data.len() bedeutet: Eingabe zu kurz.
+    /// Consumed bytes (including a partially used byte); > data.len() means: input too short.
     fn consumed(&self) -> usize {
         self.pos - (self.n / 8) as usize
     }
@@ -140,7 +140,7 @@ impl<'a> Bits<'a> {
             self.n -= len;
             return Some((e >> 4) as usize);
         }
-        // langsamer Weg (Codes länger als FAST_BITS oder ungültig)
+        // slow path (codes longer than FAST_BITS or invalid)
         let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
         for len in 1..16 {
             code |= (self.buf & 1) as i32;
@@ -209,8 +209,8 @@ fn codes(b: &mut Bits, out: &mut Vec<u8>, lit: &Huff, dist: &Huff, max_out: usiz
     }
 }
 
-/// Entpackt einen zlib-Strom vollständig. `None` bei jedem Fehler, wenn nicht genau alle
-/// Eingabebytes verbraucht werden oder die Ausgabe `max_out` übersteigt.
+/// Decompresses a complete zlib stream. `None` on any error, if not exactly all input bytes
+/// are consumed, or if the output exceeds `max_out`.
 pub fn inflate_zlib(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
     if zs.len() < 6 {
         return None;
@@ -242,7 +242,7 @@ pub fn inflate_zlib(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
                 l[256..280].fill(7);
                 l[280..].fill(8);
                 let lit = Huff::new(&l, Kind::Lens)?;
-                // 32 Codes der Länge 5; die Symbole 30 und 31 sind ungültig (in `codes` abgelehnt)
+                // 32 codes of length 5; the symbols 30 and 31 are invalid (rejected in `codes`)
                 let dist = Huff::new(&[5u8; 32], Kind::Dists)?;
                 codes(&mut b, &mut out, &lit, &dist, max_out)?;
             }
@@ -283,7 +283,7 @@ pub fn inflate_zlib(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
                     }
                 }
                 if lens[256] == 0 {
-                    return None; // kein Blockende-Code
+                    return None; // no end-of-block code
                 }
                 let lit = Huff::new(&lens[..nlen], Kind::Lens)?;
                 let dist = Huff::new(&lens[nlen..nlen + ndist], Kind::Dists)?;
@@ -298,7 +298,7 @@ pub fn inflate_zlib(zs: &[u8], max_out: usize) -> Option<Vec<u8>> {
             break;
         }
     }
-    // Prüfsumme steht big-endian direkt hinter dem (auf Bytegrenze aufgefüllten) Strom
+    // The checksum follows big-endian directly after the stream (padded to a byte boundary)
     b.align();
     let end = 2 + b.consumed();
     if b.overrun() || end + 4 != zs.len() {
@@ -318,9 +318,9 @@ mod tests {
     use crate::testutil::Rng;
 
     #[test]
-    fn roundtrip_mit_eigenem_deflate() {
+    fn roundtrip_with_own_deflate() {
         let mut r = Rng::new(3);
-        let text = "Der Drache bewacht das Schwert. ".repeat(500).into_bytes();
+        let text = "The dragon guards the sword. ".repeat(500).into_bytes();
         for d in [Vec::new(), b"a".to_vec(), text, r.bytes(70_000), vec![0u8; 200_000]] {
             for (lvl, mem, st) in [(1, 8, 0), (6, 8, 0), (9, 9, 1), (4, 1, 0)] {
                 let z = deflate_with(&d, lvl, mem, st).unwrap();
@@ -329,21 +329,21 @@ mod tests {
         }
     }
     #[test]
-    fn beschaedigt_und_grenzen() {
+    fn corrupt_and_limits() {
         let d = "abc abc abc xyz ".repeat(300).into_bytes();
         let z = deflate_with(&d, 6, 8, 0).unwrap();
-        assert!(inflate_zlib(&z, d.len() - 1).is_none(), "max_out überschritten");
+        assert!(inflate_zlib(&z, d.len() - 1).is_none(), "max_out exceeded");
         let mut long = z.clone();
         long.push(0);
-        assert!(inflate_zlib(&long, 1 << 20).is_none(), "Daten hinter dem Strom");
-        assert!(inflate_zlib(&z[..z.len() - 1], 1 << 20).is_none(), "abgeschnitten");
+        assert!(inflate_zlib(&long, 1 << 20).is_none(), "data behind the stream");
+        assert!(inflate_zlib(&z[..z.len() - 1], 1 << 20).is_none(), "truncated");
         let mut r = Rng::new(4);
         for _ in 0..2000 {
             let mut m = z.clone();
             let i = r.next() as usize % m.len();
             m[i] ^= 1 << (r.next() % 8);
             if let Some(o) = inflate_zlib(&m, 1 << 20) {
-                assert_eq!(o, d, "beschädigter Strom mit falschem Inhalt akzeptiert");
+                assert_eq!(o, d, "corrupted stream accepted with wrong content");
             }
         }
     }

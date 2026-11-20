@@ -1,23 +1,23 @@
-//! Kommandozeile von gpk (gleiche Optionen und Ausgaben wie die C-Version).
+//! Command line of gpk (same options as the C version).
 
 use gpk::archive::{self, Options, CODEC_XZ};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "Verwendung:
-  gpk c [Optionen] <build-ordner> <archiv.gpk>
-  gpk x [-t N] <archiv.gpk> <ziel-ordner>
-  gpk l <archiv.gpk>
-Optionen beim Packen:
-  -l N         Stufe 1..9 (Standard 9)
-  -t N         Threads (Standard 4)
-  -b MiB       Blockgröße (Standard 64)
-  --max-ram GB Speicherbudget: Threads und ggf. Blockgröße werden passend gewählt
-  --xz         xz/LZMA2 statt LZRC als Kern (Vergleich)
-  --no-cm      Text-Kern (Context Mixing) aus: schneller entpacken, Text größer
-  --no-filter --no-sort --no-dedup --no-raw   einzelne Stufen abschalten
-  --no-preproc alle Vorverarbeitungsstufen abschalten
-  -V, --version Version ausgeben";
+const USAGE: &str = "Usage:
+  gpk c [options] <build-dir> <archive.gpk>
+  gpk x [-t N] <archive.gpk> <target-dir>
+  gpk l <archive.gpk>
+Options for packing:
+  -l N         level 1..9 (default 9)
+  -t N         threads (default 4)
+  -b MiB       block size (default 64)
+  --max-ram GB memory budget: threads and, if needed, block size are chosen to fit
+  --xz         xz/LZMA2 instead of LZRC as the core (comparison; needs --features xz)
+  --no-cm      text core (context mixing) off: faster unpacking, larger text
+  --no-filter --no-sort --no-dedup --no-raw   disable individual stages
+  --no-preproc disable all preprocessing stages
+  -V, --version print the version";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -27,9 +27,9 @@ fn die(msg: impl std::fmt::Display) -> ExitCode {
     eprintln!("gpk: {msg}");
     ExitCode::from(1)
 }
-/// Ganzzahl wie C `atoi` lesen, aber Fehler melden statt still 0 anzunehmen.
+/// Parse an integer like C `atoi`, but report errors instead of silently assuming 0.
 fn num(s: &str, what: &str) -> Result<i64, String> {
-    s.trim().parse::<i64>().map_err(|_| format!("{what}: ungültige Zahl '{s}'"))
+    s.trim().parse::<i64>().map_err(|_| format!("{what}: invalid number '{s}'"))
 }
 
 fn main() -> ExitCode {
@@ -70,7 +70,7 @@ fn main() -> ExitCode {
                         opt.max_ram_gb = v;
                         Ok(())
                     }
-                    _ => Err("--max-ram braucht einen Wert > 0 (GB)".into()),
+                    _ => Err("--max-ram needs a value > 0 (GB)".into()),
                 }
             }
             "--xz" => {
@@ -78,7 +78,7 @@ fn main() -> ExitCode {
                     opt.codec = CODEC_XZ;
                     Ok(())
                 } else {
-                    Err("--xz ist in diesem Build nicht verfügbar (ohne liblzma gebaut)".into())
+                    Err("--xz is not available in this build (built without liblzma; use --features xz)".into())
                 }
             }
             "--no-filter" => {
@@ -120,7 +120,7 @@ fn main() -> ExitCode {
         i += 1;
     }
     if !(1..=1024).contains(&block_mib) {
-        return die("Blockgröße muss 1..1024 MiB sein");
+        return die("block size must be 1..1024 MiB");
     }
     opt.block = (block_mib as u64) << 20;
     opt.threads = threads.clamp(1, 64) as usize;

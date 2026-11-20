@@ -1,8 +1,7 @@
-//! PXC – verlustfreier Pixel-Coder für 8-Bit-Bilder (Port von `legacy-c/gpk/pxc.c`, bytegleich).
+//! PXC – lossless pixel coder for 8-bit images (port of `legacy-c/gpk/pxc.c`, byte-identical).
 //!
-//! Optionale Farbtransformation (R-G, B-G), gewichtete Mischung von 6 Prädiktoren
-//! nach lokalem Fehler, Bias-Korrektur, kontextadaptive Arithmetikkodierung.
-//! Nur Ganzzahl-Arithmetik.
+//! Optional color transform (R-G, B-G), weighted mix of 6 predictors by local error,
+//! bias correction, context-adaptive arithmetic coding. Integer arithmetic only.
 
 const NACT: usize = 10;
 const NERR: usize = 7;
@@ -111,7 +110,7 @@ impl Model {
     }
 }
 
-/// Je Kanal: ganze Ebene, |Fehler| je Prädiktor und |Rest| für Zeile darüber [0] / aktuelle [1].
+/// Per channel: whole plane, |error| per predictor and |residual| for the row above [0] / current [1].
 struct Chan {
     pl: Vec<i16>,
     pe: [[Vec<u16>; 2]; NPRED],
@@ -173,7 +172,7 @@ fn context(m: &Model, c: &Chan, w: usize, x: usize, y: usize, k: usize, r0mag: i
     let g = wv + n - nw;
     let (mx, mn) = (wv.max(n), wv.min(n));
     let p = [med(wv, n, nw), g.clamp(mn, mx), wv, n, (wv + n + 1) >> 1, (wv + n + nw + ne + 2) >> 2];
-    // Gewichtete Mischung: Gewicht ~ 1 / (lokaler Fehler)^2
+    // Weighted mix: weight ~ 1 / (local error)^2
     let (mut num, mut den) = (0i64, 0i64);
     for (i, &pi) in p.iter().enumerate() {
         let mut e: u32 = 1;
@@ -287,7 +286,7 @@ fn encode_ct(px: &[u8], w: usize, h: usize, ch: usize, ct: bool) -> Vec<u8> {
         }
     }
     let mut m = Model::new();
-    let mut a = Enc { x1: 0, x2: 0xFFFF_FFFF, out: vec![ct as u8] }; // erstes Byte: Farbtransformation
+    let mut a = Enc { x1: 0, x2: 0xFFFF_FFFF, out: vec![ct as u8] }; // first byte: color transform
     for y in 0..h {
         for x in 0..w {
             let mut r0 = 0;
@@ -313,7 +312,7 @@ fn encode_ct(px: &[u8], w: usize, h: usize, ch: usize, ct: bool) -> Vec<u8> {
     a.out
 }
 
-/// Kodiert w*h Pixel mit ch Kanälen (1..4), beide Varianten der Farbtransformation, kleinere gewinnt.
+/// Encodes w*h pixels with ch channels (1..4), both color-transform variants, the smaller wins.
 pub fn encode(px: &[u8], w: u32, h: u32, ch: usize) -> Option<Vec<u8>> {
     let (w, h) = (w as usize, h as usize);
     if !(1..=4).contains(&ch) || w == 0 || h == 0 || px.len() < w * h * ch {
@@ -327,7 +326,7 @@ pub fn encode(px: &[u8], w: u32, h: u32, ch: usize) -> Option<Vec<u8>> {
     Some(if b.len() < a.len() { b } else { a })
 }
 
-/// Dekodiert in `px` (w*h*ch Bytes). `false` bei beschädigten Daten.
+/// Decodes into `px` (w*h*ch bytes). `false` on corrupted data.
 pub fn decode(src: &[u8], px: &mut [u8], w: u32, h: u32, ch: usize) -> bool {
     let (w, h) = (w as usize, h as usize);
     if !(1..=4).contains(&ch) || w == 0 || h == 0 || px.len() < w * h * ch || src.is_empty() || src[0] > 1 {
@@ -349,7 +348,7 @@ pub fn decode(src: &[u8], px: &mut [u8], w: u32, h: u32, ch: usize) -> bool {
                 let v = o.pred + r;
                 let lo = if ct && k > 0 && k < 3 { -255 } else { 0 };
                 if v < lo || v > 255 {
-                    return false; // beschädigte Daten
+                    return false; // corrupted data
                 }
                 c[k].pl[y * w + x] = v as i16;
                 learn(&mut m, &mut c[k], x, k, &o, v);

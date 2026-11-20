@@ -1,9 +1,9 @@
-"""Erzeugt einen realistischen Test-Spiel-Build (Linux, ~250 MB).
+"""Creates a realistic test game build (Linux, ~330 MB).
 
-Echte Daten: x86-64-Bibliotheken des Systems (als Engine/Plugins), Python-Quelltexte
-(als Spielskripte), TrueType-Schriften. Synthetisch: DDS-Texturen (echtes BC1/BC3 mit
-Mipmaps), Musik (Ogg-artig, bereits komprimiert), Soundeffekte (WAV), Meshes, Level,
-Lokalisierung, Shader, Video. Dazu DLC-Duplikate und Symlinks wie in echten Builds.
+Real data: x86-64 system libraries (as engine/plugins), Python sources (as game scripts),
+TrueType fonts. Synthetic: DDS textures (real BC1/BC3 with mipmaps), music (Ogg-like,
+already compressed), sound effects (WAV), meshes, levels, localization, shaders, video,
+JPEG images (needs Pillow). Plus DLC duplicates and symlinks as in real builds.
 """
 import glob
 import json
@@ -48,7 +48,7 @@ def noise(h, w, octaves=5, base=4, persistence=0.55):
     return out / tot
 
 
-# ---------------------------------------------------------------- Texturen
+# ---------------------------------------------------------------- Textures
 def make_image(n, kind):
     yy, xx = np.mgrid[0:n, 0:n]
     nz = noise(n, n, octaves=6, base=4)
@@ -63,7 +63,7 @@ def make_image(n, kind):
     elif kind == "wood":
         rings = np.sin((xx * 0.02 + nz * 8.0) * 6.0) * 0.5 + 0.5
         col = pal[0][None, None] * (0.5 + 0.5 * rings[..., None])
-    else:  # organisch: Gras/Stein/Erde
+    else:  # organic: grass/stone/soil
         n2 = noise(n, n, octaves=4, base=8)
         t = np.clip((nz - 0.5) * 4 + 0.5, 0, 1)[..., None]
         col = pal[0] * t + pal[1] * (1 - t); col *= (0.8 + 0.4 * n2[..., None])
@@ -154,9 +154,9 @@ for i, (n, fmt) in enumerate(tex_specs):
     name = f"{kind}_{i:02d}_{'albedo' if fmt == 'DXT1' else 'albedo_alpha'}.dds"
     write(f"MyGame_Data/Textures/{name}", dds(rgb, alpha, fmt))
     tex_names.append(name)
-print("Texturen fertig")
+print("textures done")
 
-# UI-Bilder als PNG (bereits zlib-komprimiert)
+# UI images as PNG (already zlib-compressed)
 def png(rgba):
     h, w = rgba.shape[:2]
     raw = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
@@ -190,7 +190,7 @@ for i in range(70):
     s += env * rng.normal(0, float(rng.uniform(0.002, 0.15)), t.shape)
     st = np.stack([s, np.roll(s, int(rng.integers(0, 40))) * 0.9], -1)
     write(f"MyGame_Data/Audio/SFX/sfx_{['hit','step','magic','ui','door'][i % 5]}_{i:02d}.wav", wav(st))
-print("Audio fertig")
+print("audio done")
 
 # ---------------------------------------------------------------- Meshes
 def mesh(kind, res):
@@ -220,7 +220,7 @@ for i in range(28):
     kind = ["terrain", "rock", "pillar"][i % 3]
     res = int(rng.choice([96, 128, 192, 256]))
     write(f"MyGame_Data/Meshes/{kind}_{i:02d}.mesh", mesh(kind, res))
-print("Meshes fertig")
+print("meshes done")
 
 # ---------------------------------------------------------------- Level
 for lv in range(12):
@@ -240,7 +240,8 @@ for lv in range(12):
     write(f"MyGame_Data/Levels/level_{lv:02d}.map", b"LVL1" + struct.pack("<II", n, n) + tm.astype("<u2").tobytes())
     write(f"MyGame_Data/Levels/level_{lv:02d}_entities.json", json.dumps({"level": lv, "entities": ents}, indent=2).encode())
 
-# ---------------------------------------------------------------- Lokalisierung
+# ---------------------------------------------------------------- Localization
+# (the word lists are localized sample content in their respective languages)
 vocab = {
     "de": "der die das und Schwert Schild Drache Burg König Held Quest Gold Trank Magie Feuer Wald Höhle Dorf Händler kaufen gehen finden kämpfen Schatz Tür Schlüssel Ritter Rüstung".split(),
     "en": "the a and sword shield dragon castle king hero quest gold potion magic fire forest cave village merchant buy go find fight treasure door key knight armor".split(),
@@ -260,7 +261,7 @@ for lang, words in vocab.items():
                   "voice": f"vo/{lang}/{key}.ogg"}
     write(f"MyGame_Data/Localization/{lang}.json", json.dumps(d, ensure_ascii=False, indent=1).encode("utf-8"))
 
-# ---------------------------------------------------------------- Skripte (echter Quelltext)
+# ---------------------------------------------------------------- Scripts (real source code)
 pydir = sorted(glob.glob("/usr/lib/python3.12"))[0]
 total = 0
 for f in sorted(glob.glob(pydir + "/**/*.py", recursive=True)):
@@ -272,7 +273,7 @@ for f in sorted(glob.glob(pydir + "/**/*.py", recursive=True)):
 
 # Shader
 for i in range(150):
-    lines = ["#version 450", f"// Shader-Variante {i}", "layout(location=0) in vec3 inPos;", "layout(location=1) in vec3 inNormal;",
+    lines = ["#version 450", f"// shader variant {i}", "layout(location=0) in vec3 inPos;", "layout(location=1) in vec3 inNormal;",
              "layout(location=2) in vec2 inUV;", "layout(set=0,binding=0) uniform Camera { mat4 view; mat4 proj; } cam;"]
     for d in rng.choice(["FOG", "SHADOWS", "SKINNING", "NORMALMAP", "ALPHATEST", "WIND", "DETAIL"], 3, replace=False):
         lines.append(f"#define USE_{d} 1")
@@ -280,14 +281,14 @@ for i in range(150):
         lines.append(f"    vec3 t{k} = normalize(inNormal * {rng.uniform(0, 2):.4f} + vec3({rng.uniform():.3f}, {rng.uniform():.3f}, {rng.uniform():.3f}));")
     write(f"MyGame_Data/Shaders/variant_{i:03d}.glsl", ("\n".join(lines) + "\n").encode())
 
-# Schriften (echt)
+# Fonts (real)
 for f in sorted(glob.glob("/usr/share/fonts/truetype/**/*.ttf", recursive=True))[:8]:
     shutil.copyfile(f, path("MyGame_Data", "Fonts", os.path.basename(f)))
 
-# Video (bereits komprimiert)
+# Video (already compressed)
 write("MyGame_Data/Movies/intro.bk2", b"KB2j" + rng.integers(0, 256, 22_000_000, dtype=np.uint8).tobytes())
 
-# ---------------------------------------------------------------- Programmcode (echte x86-64-Binärdateien)
+# ---------------------------------------------------------------- Program code (real x86-64 binaries)
 libdir = "/usr/lib/x86_64-linux-gnu"
 shutil.copyfile(f"{libdir}/libclang-18.so.18", path("MyGame.x86_64")); os.chmod(path("MyGame.x86_64"), 0o755)
 plugins = ["libstdc++.so.6", "libicuuc.so.74", "libz.so.1", "libbz2.so.1.0", "liblzma.so.5", "libzstd.so.1", "libssl.so.3", "libcrypto.so.3", "libsqlite3.so.0", "libxml2.so.2"]
@@ -299,14 +300,14 @@ for lib in plugins:
             os.symlink(os.path.basename(src), path("lib", lib))
 for f in sorted(glob.glob("/usr/bin/*"))[:0]:
     pass
-# Crash-Reporter bringt eigene Kopien derselben Bibliotheken mit (typische Duplikate)
+# The crash reporter ships its own copies of the same libraries (typical duplicates)
 for lib in ["libstdc++.so.6", "libz.so.1", "libssl.so.3", "libcrypto.so.3"]:
     src = os.path.realpath(f"{libdir}/{lib}")
     if os.path.exists(src):
         shutil.copyfile(src, path("tools", "crashreporter", "lib", lib))
 shutil.copyfile("/usr/bin/python3.12" if os.path.exists("/usr/bin/python3.12") else sys.executable, path("tools", "crashreporter", "CrashReporter"))
 
-# ---------------------------------------------------------------- DLC mit Duplikaten
+# ---------------------------------------------------------------- DLC with duplicates
 for name in tex_names[8:14]:
     shutil.copyfile(path("MyGame_Data", "Textures", name), path("DLC", "WinterPack", "Textures", name))
 for i in range(4):
@@ -314,21 +315,21 @@ for i in range(4):
     write(f"DLC/WinterPack/Textures/snow_{kinds[i]}_{i}.dds", dds(rgb, alpha, "DXT1"))
 shutil.copyfile(path("MyGame_Data", "Localization", "en.json"), path("DLC", "WinterPack", "Localization", "en.json"))
 
-# Kleinkram
+# Odds and ends
 write("config/default.ini", "\n".join(f"[{s}]\n" + "\n".join(f"{k}={int(rng.integers(0, 100))}" for k in ["volume", "fov", "quality", "vsync"]) for s in ["Audio", "Video", "Input"]).encode())
-write("README.txt", ("MyGame – Installationshinweise\n" * 40).encode())
+write("README.txt", ("MyGame – installation notes\n" * 40).encode())
 write("EULA.txt", (" ".join(vocab["en"]) * 300).encode())
 os.makedirs(path("saves", ".keep").rsplit("/", 1)[0], exist_ok=True)
 
-# JPEG-Bilder: Ladebildschirme, Konzeptgrafiken, UI-Hintergründe (fotoähnlich).
-# Werden zuletzt erzeugt, damit alle übrigen Dateien unverändert bleiben;
-# braucht Pillow, mit --ohne-jpeg abschaltbar (alter Build-Inhalt).
-if "--ohne-jpeg" not in sys.argv:
+# JPEG images: loading screens, concept art, UI backgrounds (photo-like).
+# Created last so that all other files stay unchanged;
+# needs Pillow, can be disabled with --no-jpeg (old build content).
+if "--no-jpeg" not in sys.argv:
     try:
         from PIL import Image
     except ImportError:
         Image = None
-        print("Hinweis: Pillow fehlt, keine JPEG-Dateien erzeugt")
+        print("note: Pillow missing, no JPEG files created")
     if Image is not None:
         def landscape(w, h, seed):
             r = np.random.default_rng(seed)
@@ -339,7 +340,7 @@ if "--ohne-jpeg" not in sys.argv:
             tex = noise(h, w, 6, 6)[..., None]
             land = (np.array([0.25, 0.4, 0.15]) + 0.25 * r.random(3)) * (0.6 + 0.6 * tex)
             img = np.where(ground, land, sky)
-            for _ in range(int(r.integers(3, 9))):          # Bäume/Felsen/Gebäude
+            for _ in range(int(r.integers(3, 9))):          # trees/rocks/buildings
                 cx, cy, rad = r.random(), r.uniform(0.4, 0.9), r.uniform(0.02, 0.12)
                 m = ((xx - cx * w / h) ** 2 + ((yy - cy) * 1.6) ** 2) < rad ** 2
                 img[m] = img[m] * 0.4 + r.random(3) * 0.6 * (0.7 + 0.3 * tex[m])
@@ -353,4 +354,4 @@ if "--ohne-jpeg" not in sys.argv:
             landscape(1024, 512, 300 + i).save(path("MyGame_Data", "UI", "Backgrounds", f"menu_bg_{i:02d}.jpg"), quality=85)
 
 size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(OUT) for f in fs if not os.path.islink(os.path.join(d, f)))
-print(f"Build fertig: {OUT}, {size/1e6:.1f} MB")
+print(f"build done: {OUT}, {size/1e6:.1f} MB")

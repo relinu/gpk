@@ -1,10 +1,10 @@
-//! Verlustfreie, bitgenaue JPEG-Rekompression (Port von `legacy-c/gpk/jpgx.c`, formatgleich).
+//! Lossless, bit-exact JPEG recompression (port of `legacy-c/gpk/jpgx.c`, same format).
 //!
-//! Baseline/Extended sequentiell (SOF0/SOF1), Huffman, 8 Bit, 1–4 Komponenten,
-//! beliebige Abtastung, ein Scan, Restart-Intervalle. Der Scan wird zu
-//! DCT-Koeffizienten dekodiert und mit einem Kontextmodell neu kodiert; beim
-//! Entpacken wird der Huffman-Strom exakt neu erzeugt. Alles andere wird abgelehnt.
-//! Format: `"JPGX" | u32 kopf | kopf | u32 ende | ende | u32 modell | modell`.
+//! Baseline/extended sequential (SOF0/SOF1), Huffman, 8 bits, 1–4 components, any
+//! subsampling, one scan, restart intervals. The scan is decoded into DCT coefficients and
+//! re-encoded with a context model; on unpacking the Huffman stream is recreated exactly.
+//! Everything else is rejected.
+//! Format: `"JPGX" | u32 head | head | u32 tail | tail | u32 model | model`.
 
 const MAX_PIXELS: u64 = 1 << 28;
 
@@ -52,7 +52,7 @@ impl Huff {
             }
             self.maxcode[l] = if self.bits[l] != 0 { code - 1 } else { -1 };
             if code > (1 << l) {
-                return false; // kein gültiger Präfixcode
+                return false; // not a valid prefix code
             }
             code <<= 1;
         }
@@ -98,7 +98,7 @@ fn be16(d: &[u8], i: usize) -> u32 {
     (d[i] as u32) << 8 | d[i + 1] as u32
 }
 
-/// Kopf bis einschließlich SOS lesen; `None` bei nicht unterstützten Dateien.
+/// Read the header up to and including SOS; `None` for unsupported files.
 fn parse_header(d: &[u8]) -> Option<JInfo> {
     let n = d.len();
     let mut j = JInfo::default();
@@ -112,7 +112,7 @@ fn parse_header(d: &[u8]) -> Option<JInfo> {
             return None;
         }
         while p < n && d[p] == 0xFF {
-            p += 1; // Füllbytes
+            p += 1; // fill bytes
         }
         if p >= n {
             return None;
@@ -155,7 +155,7 @@ fn parse_header(d: &[u8]) -> Option<JInfo> {
                 }
                 have_sof = true;
             }
-            0xC2..=0xCF if m != 0xC4 && m != 0xC8 && m != 0xCC => return None, // progressiv, verlustfrei, arithmetisch
+            0xC2..=0xCF if m != 0xC4 && m != 0xC8 && m != 0xCC => return None, // progressive, lossless, arithmetic
             0xC4 => {
                 let mut q = 0usize;
                 while q < sl {
@@ -195,7 +195,7 @@ fn parse_header(d: &[u8]) -> Option<JInfo> {
                 }
                 j.ns = s[0] as usize;
                 if !(1..=4).contains(&j.ns) || sl != 4 + 2 * j.ns || j.ns != j.nf {
-                    return None; // nur ein Scan mit allen Komponenten
+                    return None; // only one scan with all components
                 }
                 for i in 0..j.ns {
                     let cid = s[1 + 2 * i];
@@ -227,7 +227,7 @@ fn parse_header(d: &[u8]) -> Option<JInfo> {
         }
         p += l;
     }
-    // Geometrie
+    // Geometry
     j.interleaved = j.ns > 1;
     if j.interleaved {
         j.mcux = j.x.div_ceil(8 * j.hmax);
@@ -254,7 +254,7 @@ fn parse_header(d: &[u8]) -> Option<JInfo> {
     Some(j)
 }
 
-/// Blöcke in Scan-Reihenfolge: (Komponente, Koeffizienten-Offset) je MCU.
+/// Blocks in scan order: (component, coefficient offset) per MCU.
 fn mcu_blocks(j: &JInfo, mcu: usize, out: &mut Vec<(usize, usize)>) {
     out.clear();
     let (my, mx) = (mcu / j.mcux, mcu % j.mcux);
@@ -270,7 +270,7 @@ fn mcu_blocks(j: &JInfo, mcu: usize, out: &mut Vec<(usize, usize)>) {
     }
 }
 
-// ---------------- Huffman-Scan dekodieren ----------------
+// ---------------- Decode the Huffman scan ----------------
 struct Br<'a> {
     d: &'a [u8],
     p: usize,
@@ -289,7 +289,7 @@ impl<'a> Br<'a> {
             self.p += 1;
             if x == 0xFF {
                 if self.p >= self.d.len() || self.d[self.p] != 0x00 {
-                    self.err = true; // Marker mitten in Daten
+                    self.err = true; // marker in the middle of the data
                     return 0;
                 }
                 self.p += 1;
@@ -318,7 +318,7 @@ impl<'a> Br<'a> {
         self.err = true;
         0
     }
-    /// Restbits bis zur Bytegrenze müssen 1 sein (Standard-Padding).
+    /// The remaining bits up to the byte boundary must be 1 (standard padding).
     fn pad_ok(&mut self) -> bool {
         let mask = (1u32 << self.cnt) - 1;
         let ok = self.byte & mask == mask;
@@ -382,7 +382,7 @@ fn decode_scan(d: &[u8], j: &mut JInfo) -> Option<usize> {
         if j.ri != 0 {
             left -= 1;
             if left == 0 && mcu + 1 < total {
-                // Restart-Intervall endet
+                // restart interval ends
                 if !b.pad_ok() || b.p + 2 > d.len() || d[b.p] != 0xFF || d[b.p + 1] != 0xD0 + rst {
                     return None;
                 }
@@ -399,7 +399,7 @@ fn decode_scan(d: &[u8], j: &mut JInfo) -> Option<usize> {
     Some(b.p)
 }
 
-// ---------------- Huffman-Scan exakt neu erzeugen ----------------
+// ---------------- Recreate the Huffman scan exactly ----------------
 struct Bw {
     o: Vec<u8>,
     acc: u32,
@@ -499,7 +499,7 @@ fn encode_scan(j: &JInfo) -> Option<Vec<u8>> {
     Some(w.o)
 }
 
-// ---------------- Kontextmodell für die Koeffizienten ----------------
+// ---------------- Context model for the coefficients ----------------
 #[derive(Clone, Copy)]
 struct Prob {
     f: u16,
@@ -507,7 +507,7 @@ struct Prob {
 }
 const P_INIT: Prob = Prob { f: 32768, s: 32768 };
 
-/// Binärer Arithmetik-Coder; dieselbe Modellfunktion kodiert (dec=false) oder liest (dec=true).
+/// Binary arithmetic coder; the same model function encodes (dec=false) or reads (dec=true).
 struct Ac<'a> {
     x1: u32,
     x2: u32,
@@ -601,7 +601,7 @@ fn qnz(v: i32) -> usize {
     }
     c
 }
-/// Betrag >= 1: Exponent unär + Mantisse
+/// Magnitude >= 1: exponent in unary + mantissa
 fn code_mag(a: &mut Ac, ex: &mut [Prob; MAXE], mt: &mut [[Prob; 2]; MAXE], v: i32) -> i32 {
     let mut e = 0usize;
     if !a.dec {
@@ -627,7 +627,7 @@ fn sign(v: i16) -> i32 {
     (v > 0) as i32 - (v < 0) as i32
 }
 
-/// Alle Koeffizienten einer Komponente kodieren/dekodieren (Rasterreihenfolge der Blöcke).
+/// Encode/decode all coefficients of a component (blocks in raster order).
 fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
     for r in 0..c.bh {
         for col in 0..c.bw {
@@ -637,7 +637,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
             let a_blk: Option<&[i16]> = (r > 0).then(|| &prev[o - c.bw * 64..o - c.bw * 64 + 64]);
             let l_blk: Option<&[i16]> = (col > 0).then(|| &prev[o - 64..o]);
             let al_blk: Option<&[i16]> = (r > 0 && col > 0).then(|| &prev[o - c.bw * 64 - 64..o - c.bw * 64]);
-            // DC: Vorhersage MED(A, L, AL)
+            // DC: prediction MED(A, L, AL)
             let pa = a_blk.map_or_else(|| l_blk.map_or(0, |l| l[0] as i32), |x| x[0] as i32);
             let pl = l_blk.map_or(pa, |l| l[0] as i32);
             let pal = al_blk.map_or(pa, |x| x[0] as i32);
@@ -665,7 +665,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 }
                 b[0] = v as i16;
             }
-            // Anzahl Nicht-Null-AC
+            // number of non-zero AC coefficients
             let na = a_blk.map_or(-1, nzcount);
             let nl = l_blk.map_or(-1, nzcount);
             let avg = if na < 0 {
@@ -682,7 +682,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 node = (node << 1) | a.bit(&mut m.nz[cls][nzq][node], (nnz_in >> bit) & 1 != 0) as usize;
             }
             let mut rem = node as i32 - 64;
-            // AC in Zickzack-Reihenfolge
+            // AC in zigzag order
             let mut k = 1usize;
             while k < 64 && rem > 0 {
                 let ma = a_blk.map_or(-1, |x| (x[k] as i32).abs());
@@ -733,12 +733,12 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
     true
 }
 
-/// Umgewandelte Daten oder `None` (nicht unterstützt / nicht exakt reproduzierbar).
+/// Transformed data or `None` (unsupported / not exactly reproducible).
 pub fn forward(jpg: &[u8]) -> Option<Vec<u8>> {
     let n = jpg.len();
     let mut j = parse_header(jpg)?;
     let scan_end = decode_scan(jpg, &mut j)?;
-    // nach dem Scan muss EOI folgen (Rest wird unverändert übernommen)
+    // EOI must follow the scan (the rest is copied unchanged)
     if scan_end + 2 > n || jpg[scan_end] != 0xFF || jpg[scan_end + 1] != 0xD9 {
         return None;
     }
@@ -762,12 +762,12 @@ pub fn forward(jpg: &[u8]) -> Option<Vec<u8>> {
     t.extend_from_slice(&jpg[scan_end..]);
     t.extend_from_slice(&(a.out.len() as u32).to_le_bytes());
     t.extend_from_slice(&a.out);
-    // Sicherheitsnetz: vollständige Rekonstruktion prüfen
+    // Safety net: check the complete reconstruction
     let mut chk = vec![0u8; n];
     (inverse(&t, &mut chk) && chk == jpg).then_some(t)
 }
 
-/// Rekonstruiert das Original (`out.len()` = Originalgröße).
+/// Reconstructs the original (`out.len()` = original size).
 pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
     let tn = t.len();
     if tn < 16 || &t[..4] != b"JPGX" {
@@ -819,13 +819,13 @@ mod tests {
     use super::*;
     use crate::testutil::Rng;
 
-    /// Beispiel-JPEGs aus der C-Referenz (tests/sample_jpegs.h, mit Pillow erzeugt)
+    /// Sample JPEGs from the C reference (tests/sample_jpegs.h, created with Pillow)
     use crate::testutil::jpeg_samples as samples;
 
     #[test]
     fn roundtrip_samples() {
         for s in samples() {
-            let t = forward(&s).expect("Beispiel-JPEG umwandelbar");
+            let t = forward(&s).expect("sample JPEG transformable");
             let mut out = vec![0u8; s.len()];
             assert!(inverse(&t, &mut out));
             assert_eq!(out, s);
@@ -846,7 +846,7 @@ mod tests {
                 let cut = if it % 5 == 0 { r.next() as usize % m.len() } else { m.len() };
                 if let Some(t2) = forward(&m[..cut]) {
                     let mut o = vec![0u8; cut];
-                    assert!(inverse(&t2, &mut o) && o == m[..cut], "akzeptiert, aber falsch rekonstruiert");
+                    assert!(inverse(&t2, &mut o) && o == m[..cut], "accepted, but reconstructed incorrectly");
                 }
                 let mut x = t.clone();
                 for _ in 0..1 + r.next() % 4 {

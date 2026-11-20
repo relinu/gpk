@@ -1,11 +1,11 @@
-//! Bitgenaue PNG-Rekompression (Port von `legacy-c/gpk/pngx.c`, formatgleich).
+//! Bit-exact PNG recompression (port of `legacy-c/gpk/pngx.c`, same format).
 //!
-//! Der IDAT-zlib-Strom wird entpackt, wenn zlib ihn mit bestimmten Parametern
-//! (Level, memLevel, Strategie) bitgenau neu erzeugt. Gespeichert wird dann:
-//! - Variante 1 `PNGX`: Kopf + Skelett (PNG ohne IDAT-Nutzdaten) + entpackte Rohdaten
-//! - Variante 2 `PNGY`: Kopf + Skelett + Zeilenfiltertypen + Pixel-Coder-Daten
+//! The IDAT zlib stream is inflated if zlib reproduces it bit-exactly with certain parameters
+//! (level, memLevel, strategy). Then it is stored as:
+//! - variant 1 `PNGX`: header + skeleton (PNG without IDAT payload) + inflated raw data
+//! - variant 2 `PNGY`: header + skeleton + row filter types + pixel coder data
 //!
-//! Jede Umwandlung wird vor der Rückgabe vollständig rekonstruiert und geprüft.
+//! Every transformation is fully reconstructed and checked before it is returned.
 
 use crate::{deflate, inflate, pxc};
 
@@ -21,7 +21,7 @@ fn rd32(p: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]])
 }
 
-// ---- PNG-Zeilenfilter (8 Bit je Kanal, bpp = Kanäle) ----
+// ---- PNG row filters (8 bits per channel, bpp = channels) ----
 #[inline]
 fn paeth(a: i32, b: i32, c: i32) -> u8 {
     let p = a + b - c;
@@ -50,7 +50,7 @@ fn png_pred(f: u8, cur: &[u8], prior: Option<&[u8]>, i: usize, bpp: usize) -> u8
         _ => 0,
     }
 }
-/// raw (h Zeilen à 1+w*bpp) -> Pixel + Filtertypen
+/// raw (h rows of 1+w*bpp bytes) -> pixels + filter types
 fn png_unfilter(raw: &[u8], w: usize, h: usize, bpp: usize) -> Option<(Vec<u8>, Vec<u8>)> {
     let rl = w * bpp;
     let mut px = vec![0u8; rl * h];
@@ -86,7 +86,7 @@ fn png_refilter(px: &[u8], filt: &[u8], w: usize, h: usize, bpp: usize) -> Vec<u
     raw
 }
 
-/// IHDR: nur 8 Bit, nicht interlaced, Grau/RGB/Grau+Alpha/RGBA → (w, h, Kanäle)
+/// IHDR: 8 bits only, not interlaced, gray/RGB/gray+alpha/RGBA → (w, h, channels)
 fn png_geom(png: &[u8]) -> Option<(u32, u32, usize)> {
     if png.len() < 33 || &png[12..16] != b"IHDR" || be32(png, 8) != 13 {
         return None;
@@ -109,17 +109,17 @@ fn png_geom(png: &[u8]) -> Option<(u32, u32, usize)> {
     Some((w, h, ch))
 }
 
-/// Kanäle eines geeigneten PNG (für Filter-Schätzungen), sonst 0.
+/// Channels of a suitable PNG (for filter estimates), otherwise 0.
 pub fn channels(png: &[u8]) -> usize {
     png_geom(png).map_or(0, |g| g.2)
 }
 
-/// Bei der Selbstprüfung bekannt: Rohdaten und der dazu bereits bestätigte Deflate-Strom.
+/// Known during the self-check: raw data and the Deflate stream already confirmed for it.
 type Known<'a> = Option<(&'a [u8], &'a [u8])>;
 
-/// Original aus Skelett + Rohdaten + zlib-Parametern zusammensetzen. Mit `known` (Selbstprüfung
-/// beim Packen) müssen die rekonstruierten Rohdaten den Originalrohdaten gleichen; dann wird der
-/// schon Byte für Byte bestätigte Strom verwendet, statt ein zweites Mal zu komprimieren.
+/// Assemble the original from skeleton + raw data + zlib parameters. With `known` (self-check
+/// while packing) the reconstructed raw data must equal the original raw data; then the stream
+/// already confirmed byte by byte is used instead of compressing a second time.
 fn assemble(skel: &[u8], raw: &[u8], lvl: i32, mem: i32, strat: i32, out: &mut [u8], known: Known) -> bool {
     let fresh;
     let zs: &[u8] = match known {
@@ -165,14 +165,14 @@ fn assemble(skel: &[u8], raw: &[u8], lvl: i32, mem: i32, strat: i32, out: &mut [
     sp == sk && op == origsize && zp == zs.len()
 }
 
-/// mode 1: Rohdaten (PNGX), mode 2: Pixel-Coder (PNGY). `None`, wenn nicht anwendbar
-/// oder nicht bitgenau reproduzierbar.
+/// mode 1: raw data (PNGX), mode 2: pixel coder (PNGY). `None` if not applicable
+/// or not reproducible bit-exactly.
 pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
     let n = png.len();
     if n < 8 + 12 || png[..8] != SIG || n > MAX_RAW {
         return None;
     }
-    // Chunks: Skelett bauen, IDAT-Daten sammeln
+    // Chunks: build the skeleton, collect the IDAT data
     let mut skel = Vec::with_capacity(n.min(1 << 16));
     let mut zs = Vec::with_capacity(n);
     skel.extend_from_slice(&png[..8]);
@@ -201,13 +201,13 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
         return None;
     }
     let raw = inflate::inflate_zlib(&zs, MAX_RAW)?;
-    // Parameter suchen, mit denen zlib den Strom bitgenau erzeugt
+    // Search the parameters with which zlib produces the stream bit-exactly
     const LV: [i32; 9] = [9, 6, 8, 7, 5, 4, 3, 2, 1];
     for strat in [0, 1] {
         // Z_DEFAULT_STRATEGY, Z_FILTERED
         for mem in [8, 9] {
             for lvl in LV {
-                // Vergleich läuft mit und bricht beim ersten abweichenden Block ab
+                // the comparison runs alongside and stops at the first differing block
                 if !deflate::matches(&raw, lvl, mem, strat, &zs) {
                     continue;
                 }
@@ -233,8 +233,8 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
                     t.extend_from_slice(&(raw.len() as u32).to_le_bytes());
                     t.extend_from_slice(&raw);
                 }
-                // Sicherheitsnetz: Rekonstruktion vorab prüfen (der Deflate-Strom ist durch
-                // `matches` schon bestätigt; geprüft werden Rohdaten, Pixel-Coder und Aufbau)
+                // Safety net: check the reconstruction up front (the Deflate stream is already
+                // confirmed by `matches`; checked are the raw data, pixel coder and assembly)
                 let mut chk = vec![0u8; n];
                 return (inverse_impl(&t, &mut chk, Some((&raw, &zs))) && chk == png).then_some(t);
             }
@@ -243,7 +243,7 @@ pub fn forward(png: &[u8], mode: u32) -> Option<Vec<u8>> {
     None
 }
 
-/// Rekonstruiert das Original (`out.len()` = Originalgröße). `false` bei ungültigen Daten.
+/// Reconstructs the original (`out.len()` = original size). `false` on invalid data.
 pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
     inverse_impl(t, out, None)
 }
@@ -315,7 +315,7 @@ pub(crate) mod tests {
         v.extend_from_slice(&h.finalize().to_be_bytes());
         v
     }
-    /// Test-PNG mit zlib-Level `lvl` (RGBA 8 Bit, gemischte Zeilenfilter)
+    /// Test PNG with zlib level `lvl` (RGBA 8 bits, mixed row filters)
     pub fn make_png(w: u32, h: u32, lvl: i32) -> Vec<u8> {
         let mut raw = Vec::new();
         for y in 0..h {
@@ -335,16 +335,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn beide_varianten_bitgenau() {
+    fn both_variants_bit_exact() {
         for lvl in [1, 6, 9] {
             let png = make_png(64, 40, lvl);
             for mode in [1, 2] {
-                let t = forward(&png, mode).expect("umwandelbar");
+                let t = forward(&png, mode).expect("transformable");
                 let mut out = vec![0u8; png.len()];
                 assert!(inverse(&t, &mut out));
                 assert_eq!(out, png);
             }
         }
-        assert!(forward(b"kein png", 1).is_none());
+        assert!(forward(b"not a png", 1).is_none());
     }
 }

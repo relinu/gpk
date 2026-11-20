@@ -1,8 +1,8 @@
-// Mit Feature "cref": die C-Referenzmodule aus legacy-c/ für Differenztests einbinden.
+// With feature "cref": compile the C reference modules from legacy-c/ for differential tests.
 fn main() {
     #[cfg(feature = "cref")]
     {
-        let zinc = std::env::var("DEP_Z_INCLUDE").expect("libz-sys liefert DEP_Z_INCLUDE");
+        let zinc = std::env::var("DEP_Z_INCLUDE").expect("libz-sys provides DEP_Z_INCLUDE");
         cc::Build::new()
             .files([
                 "legacy-c/glz.c",

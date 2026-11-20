@@ -1,52 +1,51 @@
-# GLZ – ein Kompressor für Spiel-Assets
+# GLZ – a compressor for game assets
 
-GLZ („Game LZ“) ist ein in C geschriebener verlustfreier Kompressor, der auf die
-typischen Anforderungen von Computerspielen zugeschnitten ist, verglichen mit
-LZ4, zlib, zstd, bzip2 und xz.
+GLZ ("Game LZ") is a lossless compressor written in C (`legacy-c/glz.c`, ported to Rust in
+`src/glz.rs`) that is tailored to the typical requirements of computer games, compared with
+LZ4, zlib, zstd, bzip2 and xz.
 
-## Designentscheidungen
+## Design decisions
 
-| Anforderung im Spiel | Umsetzung in GLZ |
+| Requirement in a game | Implementation in GLZ |
 |---|---|
-| Assets werden **einmal** beim Build gepackt, aber **bei jedem Laden** entpackt | Asymmetrisch: aufwändige Kompression (Filter-Probeläufe, Hash-Ketten bis Tiefe 1024, Lazy Matching), einfacher Decoder |
-| Streaming, paralleles Laden, wahlfreier Zugriff in Paketdateien | Unabhängige 1-MiB-Blöcke mit eigener Größe im Header (überspringbar, parallel dekodierbar) |
-| Viele Binärdaten: Texturen, Vertex-Puffer, Audio, Heightmaps | **Automatische Vorfilter je Block**: Stride-Erkennung (1–32 Byte per Delta-Entropie), dann Probekompression mit *none*, *delta*, *byte-shuffle*, *shuffle+delta*; der kleinste gewinnt |
-| Strukturierte Daten mit festen Abständen | LZ77 mit **2 Repeat-Offsets** (billig kodierte Wiederholung des letzten Abstands) |
-| Schnelle Dekodierung | Kanonisches **Huffman, max. 11 Bit** → eine 2048-Einträge-Lookup-Tabelle, 4 Symbole pro Nachfüllen des 64-Bit-Bitpuffers; 8-Byte-Wildcopy für Matches |
-| Bereits komprimierte Dateien (Ogg, JPEG …) | Block wird roh gespeichert, wenn Kompression nichts bringt |
-| Beschädigte Dateien / Mods | Decoder prüft alle Grenzen; Fuzz-Test mit ASan/UBSan ohne Befund |
+| Assets are packed **once** at build time but unpacked **on every load** | Asymmetric: expensive compression (filter trial runs, hash chains up to depth 1024, lazy matching), simple decoder |
+| Streaming, parallel loading, random access in package files | Independent 1 MiB blocks with their own size in the header (skippable, decodable in parallel) |
+| Lots of binary data: textures, vertex buffers, audio, height maps | **Automatic pre-filters per block**: stride detection (1–32 bytes via delta entropy), then trial compression with *none*, *delta*, *byte shuffle*, *shuffle+delta*; the smallest wins |
+| Structured data with fixed distances | LZ77 with **2 repeat offsets** (cheaply coded repetition of the last distance) |
+| Fast decoding | Canonical **Huffman, max. 11 bits** → one 2048-entry lookup table, 4 symbols per refill of the 64-bit bit buffer; 8-byte wild copy for matches |
+| Already compressed files (Ogg, JPEG …) | The block is stored raw if compression does not help |
+| Corrupted files / mods | The decoder checks all bounds; fuzz test with ASan/UBSan without findings |
 
-### Datenformat (pro Block)
+### Data format (per block)
 
 ```
 filter(u8) stride(u8) mode(u8) rawsize(u32) payloadsize(u32) payload
-payload = nseq | HUF(Literale) | HUF(Tokens) | HUF(Offset-Codes) | Längen-Überläufe (LEB128) | Offset-Extrabits
-Token   = (min(Literallänge,15) << 4) | min(Matchlänge-4, 15)
-Offset-Code: 0 = rep0, 1 = rep1, 2+b = Offset (1<<b) + b Extrabits
+payload = nseq | HUF(literals) | HUF(tokens) | HUF(offset codes) | length overflows (LEB128) | offset extra bits
+token   = (min(literal length,15) << 4) | min(match length-4, 15)
+offset code: 0 = rep0, 1 = rep1, 2+b = offset (1<<b) + b extra bits
 ```
 
-Warum die Filter so viel bringen: In einem Vertex-Puffer (32-Byte-Vertices aus Floats)
-oder 16-Bit-Audio ändern sich benachbarte Werte nur wenig, aber das ist für einen
-byteweisen LZ-Matcher unsichtbar. *Byte-Shuffle* sortiert alle 1. Bytes, alle 2. Bytes …
-zusammen (die hohen Bytes werden fast konstant), *Delta* macht aus langsam
-veränderlichen Werten kleine Zahlen, die Huffman günstig kodiert.
+Why the filters help so much: in a vertex buffer (32-byte vertices of floats) or 16-bit audio,
+neighboring values change only a little, but that is invisible to a byte-wise LZ matcher.
+*Byte shuffle* groups all 1st bytes, all 2nd bytes … together (the high bytes become almost
+constant), *delta* turns slowly changing values into small numbers that Huffman codes cheaply.
 
-## Testkorpus
+## Test corpus
 
-Synthetisch, aber realitätsnah und deterministisch erzeugt (`gen_corpus.py`, ~19 MB):
-RGBA-Albedo-Textur 1024², 16-Bit-Heightmap, Normal Map, Terrain-Mesh (Vertex- und
-Index-Puffer, Kachel-Reihenfolge wie nach Cache-Optimierung), 16-Bit-Stereo-PCM,
-Tilemap eines Levels, Dialog-/Lokalisierungs-JSON, Spielstand mit Entity-Structs und
-ein bereits komprimierter (zufälliger) Blob.
+Synthetic, but realistic and generated deterministically (`tools/gen_corpus.py`, ~19 MB):
+RGBA albedo texture 1024², 16-bit height map, normal map, terrain mesh (vertex and index
+buffers, tile order as after a cache optimization), 16-bit stereo PCM, the tile map of a level,
+dialog/localization JSON, a save game with entity structs and an already compressed (random)
+blob.
 
-## Ergebnisse
+## Results
 
-Gemessen auf 1 Kern (`-O2 -march=native`), Systembibliotheken zlib 1.3, zstd 1.5.5,
-LZ4 1.9.4, liblzma 5.4.5, bzip2 1.0.8. Jeder Durchlauf wurde per Roundtrip verifiziert.
+Measured on 1 core (`-O2 -march=native`), system libraries zlib 1.3, zstd 1.5.5, LZ4 1.9.4,
+liblzma 5.4.5, bzip2 1.0.8. Every run was verified by a round trip.
 
-### Kompressionsrate je Datei (Original / komprimiert, höher = besser)
+### Compression ratio per file (original / compressed, higher = better)
 
-| Datei | GLZ -1 | GLZ -5 | GLZ -9 | GLZ -9 (ohne Filter) | LZ4 | LZ4HC -12 | zlib -6 | zlib -9 | zstd -3 | zstd -19 | bzip2 -9 | xz -6 |
+| File | GLZ -1 | GLZ -5 | GLZ -9 | GLZ -9 (no filter) | LZ4 | LZ4HC -12 | zlib -6 | zlib -9 | zstd -3 | zstd -19 | bzip2 -9 | xz -6 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | audio_pcm16_stereo.raw | 1.53 | 1.54 | **1.55** | 1.09 | 1.00 | 1.00 | 1.11 | 1.11 | 1.10 | 1.10 | 1.15 | 1.22 |
 | dialog_de.json | 5.46 | 6.47 | 6.84 | 6.84 | 3.48 | 5.61 | 6.22 | 6.57 | 6.03 | 8.02 | **11.49** | 8.33 |
@@ -59,15 +58,15 @@ LZ4 1.9.4, liblzma 5.4.5, bzip2 1.0.8. Jeder Durchlauf wurde per Roundtrip verif
 | savegame_entities.bin | 1.86 | 1.94 | 1.95 | 1.95 | 1.43 | 1.74 | 1.82 | 1.85 | 1.83 | 1.88 | 2.01 | **2.17** |
 | texture_rgba8.raw | 2.37 | 2.37 | 2.37 | 1.77 | 1.05 | 1.43 | 1.70 | 1.70 | 1.63 | 1.93 | **2.39** | 2.27 |
 
-### Gesamtergebnis über alle Dateien
+### Overall result across all files
 
-| Codec | Gesamtgröße (MB) | Gesamtrate | Kompression MB/s | Dekompression MB/s |
+| Codec | Total size (MB) | Overall ratio | Compression MB/s | Decompression MB/s |
 |---|---:|---:|---:|---:|
 | *Original* | 19.15 | 1.00 | – | – |
 | GLZ -1 | 8.43 | 2.27 | 22.0 | 584 |
 | GLZ -5 | 8.25 | 2.32 | 8.5 | 535 |
 | GLZ -9 | 8.19 | 2.34 | 3.0 | 565 |
-| GLZ -9 (ohne Filter) | 11.22 | 1.71 | 4.6 | 576 |
+| GLZ -9 (no filter) | 11.22 | 1.71 | 4.6 | 576 |
 | LZ4 | 15.17 | 1.26 | 914.4 | 4746 |
 | LZ4HC -12 | 13.36 | 1.43 | 14.6 | 4244 |
 | zlib -6 | 11.55 | 1.66 | 29.4 | 269 |
@@ -77,9 +76,9 @@ LZ4 1.9.4, liblzma 5.4.5, bzip2 1.0.8. Jeder Durchlauf wurde per Roundtrip verif
 | bzip2 -9 | 10.00 | 1.92 | 15.9 | 22 |
 | xz -6 | 9.43 | 2.03 | 2.7 | 42 |
 
-### Von GLZ -9 gewählte Filter (je 1-MiB-Block)
+### Filters chosen by GLZ -9 (per 1 MiB block)
 
-| Datei | Filter |
+| File | Filter |
 |---|---|
 | audio_pcm16_stereo.raw | none=0 delta=0 shuf=0 shufdelta=2 stored=0 |
 | dialog_de.json | none=2 delta=0 shuf=0 shufdelta=0 stored=0 |
@@ -92,63 +91,63 @@ LZ4 1.9.4, liblzma 5.4.5, bzip2 1.0.8. Jeder Durchlauf wurde per Roundtrip verif
 | savegame_entities.bin | none=1 delta=0 shuf=0 shufdelta=0 stored=0 |
 | texture_rgba8.raw | none=0 delta=0 shuf=0 shufdelta=4 stored=0 |
 
-## Einordnung
+## Assessment
 
-**Wo GLZ gewinnt:** Bei binären Spiel-Assets – Audio, Heightmaps, Meshes, Index-Puffer –
-ist GLZ klar vorn, oft auch vor xz und bzip2. Insgesamt ist das Archiv **8,2 MB statt
-10,6 MB (zstd -19) bzw. 9,4 MB (xz)**, also ~23 % kleiner als zstd -19. Die Ablation
-„ohne Filter“ (11,2 MB) zeigt: Der Vorteil kommt fast vollständig von den
-automatischen Vorfiltern, das LZ+Huffman-Backend allein liegt etwa auf zlib-Niveau.
+**Where GLZ wins:** on binary game assets – audio, height maps, meshes, index buffers – GLZ is
+clearly ahead, often even ahead of xz and bzip2. Overall the archive is **8.2 MB instead of
+10.6 MB (zstd -19) or 9.4 MB (xz)**, i.e. ~23 % smaller than zstd -19. The ablation "no
+filter" (11.2 MB) shows that the advantage comes almost entirely from the automatic
+pre-filters; the LZ+Huffman back end alone is roughly at zlib level.
 
-**Wo GLZ verliert:**
-- *Text/JSON und Tilemaps*: zstd -19, xz und bzip2 sind besser. Sie haben optimales
-  Parsing (statt Lazy Matching), größere Fenster (GLZ: 1-MiB-Blöcke) bzw. bei bzip2
-  die BWT, die bei Text stark ist.
-- *Dekompressionstempo*: ~550 MB/s – doppelt so schnell wie zlib und >10× schneller als
-  xz/bzip2, aber langsamer als zstd (~800–1100 MB/s) und weit hinter LZ4 (>4 GB/s).
-  Ein Teil der Zeit geht in das Rückgängigmachen der Filter.
-- *Kompressionstempo*: 3–22 MB/s; durch die Filter-Probeläufe bewusst langsam.
-  Für einen Asset-Build-Schritt meist akzeptabel, für Laufzeit-Kompression (z. B.
-  Netzwerk, Savegames) wären LZ4/zstd -3 die bessere Wahl.
+**Where GLZ loses:**
+- *Text/JSON and tile maps*: zstd -19, xz and bzip2 are better. They have optimal parsing
+  (instead of lazy matching), larger windows (GLZ: 1 MiB blocks), or, for bzip2, the BWT,
+  which is strong on text.
+- *Decompression speed*: ~550 MB/s – twice as fast as zlib and >10× faster than xz/bzip2, but
+  slower than zstd (~800–1100 MB/s) and far behind LZ4 (>4 GB/s). Part of the time goes into
+  undoing the filters.
+- *Compression speed*: 3–22 MB/s; deliberately slow because of the filter trial runs.
+  Usually acceptable for an asset build step; for runtime compression (e.g. network, save
+  games) LZ4/zstd -3 would be the better choice.
 
-**Empfehlung nach Einsatzzweck:**
+**Recommendation by use case:**
 
-| Einsatz | Beste Wahl |
+| Use case | Best choice |
 |---|---|
-| Ladezeiten auf schnellen SSDs, CPU-Budget knapp | LZ4 / LZ4HC |
-| Allround, Text-lastige Inhalte | zstd (-19 beim Build) |
-| Download-Größe von Binär-Assets minimieren, Dekodierung trotzdem schnell | **GLZ** (bzw. die Idee „Vorfilter + schneller Entropie-Coder“) |
-| Maximale Rate, Tempo egal (Archiv/Patch) | xz |
+| Load times on fast SSDs, tight CPU budget | LZ4 / LZ4HC |
+| All-round, text-heavy content | zstd (-19 at build time) |
+| Minimize the download size of binary assets while keeping decoding fast | **GLZ** (or the idea "pre-filters + fast entropy coder") |
+| Maximum ratio, speed irrelevant (archive/patch) | xz |
 
-Eine praktische Erkenntnis: Die GLZ-Filter lassen sich auch **vor zstd** schalten –
-in echten Pipelines ist das oft die einfachste Variante (so machen es z. B. Blosc
-oder Textur-Kompressoren mit Vorverarbeitung).
+A practical finding: the GLZ filters can also be placed **in front of zstd** – in real
+pipelines this is often the simplest variant (this is what e.g. Blosc or texture compressors
+with preprocessing do).
 
-## Grenzen dieses Vergleichs
+## Limits of this comparison
 
-- Synthetische Daten; echte Assets (insbesondere bereits GPU-komprimierte Texturen
-  wie BC1–BC7 / ASTC) verhalten sich anders – dort bringen Byte-Shuffle-Filter weniger,
-  spezialisierte Ansätze (Umsortierung der BCn-Blöcke) mehr.
-- Ein Kern, ein Rechner, keine Wiederholungen über mehrere Läufe hinweg.
-- GLZ hat keine Prüfsumme: Beschädigte Daten werden sicher (ohne Absturz) verarbeitet,
-  aber nicht immer als fehlerhaft erkannt. Eine CRC/xxHash pro Block wäre der nächste Schritt.
-- Mögliche Verbesserungen: optimales Parsing, tANS statt Huffman, Kontext über
-  Blockgrenzen (Wörterbuch), SIMD-Filter.
+- Synthetic data; real assets (especially textures that are already GPU-compressed such as
+  BC1–BC7 / ASTC) behave differently – there byte-shuffle filters help less and specialized
+  approaches (reordering the BCn blocks) more.
+- One core, one machine, no repetitions across several runs.
+- GLZ has no checksum: corrupted data is handled safely (without crashing), but not always
+  detected as faulty. A CRC/xxHash per block would be the next step.
+- Possible improvements: optimal parsing, tANS instead of Huffman, context across block
+  boundaries (dictionary), SIMD filters.
 
-## Nutzung
+## Usage
 
 ```bash
-make                 # baut ./bench
-make corpus          # erzeugt corpus/
-./bench corpus/* > results.csv
-python3 summarize.py results.csv
+make -C legacy-c                       # builds legacy-c/bench
+python3 tools/gen_corpus.py corpus     # creates corpus/
+legacy-c/bench corpus/* > results.csv
+python3 tools/summarize.py results.csv
 ```
 
-API (`glz.h`):
+API (`legacy-c/glz.h`):
 
 ```c
 size_t glz_bound(size_t n);
 size_t glz_compress(const void *src, size_t n, void *dst, size_t cap, int level /*1..9*/, unsigned flags);
-size_t glz_decompress(const void *src, size_t n, void *dst, size_t cap);   /* (size_t)-1 bei Fehler */
+size_t glz_decompress(const void *src, size_t n, void *dst, size_t cap);   /* (size_t)-1 on error */
 size_t glz_decompressed_size(const void *src, size_t n);
 ```

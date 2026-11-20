@@ -1,22 +1,22 @@
-//! GPK – verlustfreier Download-Packer für Spiel-Builds.
+//! GPK – lossless download packer for game builds.
 //!
-//! Module (jeweils Port der C-Referenz in `legacy-c/`, formatgleich):
-//! - [`filters`]: umkehrbare Vorfilter (Delta, Shuffle, x86, Feld-Split, Wort-Prädiktion)
-//! - [`glz`]: schneller LZ+Huffman-Kompressor (Schätzer für "bereits komprimiert")
-//! - [`lzrc`]: Hauptkern, LZ77 + optimales Parsing + Range Coder (LZMA-Prinzip)
-//! - [`tcm`]: Context-Mixing-Kern für Text
-//! - [`pxc`]: verlustfreier Pixel-Coder
-//! - [`pngx`]: bitgenaue PNG-Rekompression
-//! - [`deflate`] / [`inflate`]: eigene Deflate-Implementierung, bitgenau wie zlib 1.4
-//! - [`jpgx`]: bitgenaue JPEG-Rekompression
-//! - [`archive`]: Archivformat, Packen, Entpacken
+//! Modules (each a port of the C reference in `legacy-c/`, same format):
+//! - [`filters`]: reversible pre-filters (delta, shuffle, x86, field split, word prediction)
+//! - [`glz`]: fast LZ+Huffman compressor (estimator for "already compressed")
+//! - [`lzrc`]: main core, LZ77 + optimal parsing + range coder (LZMA principle)
+//! - [`tcm`]: context-mixing core for text
+//! - [`pxc`]: lossless pixel coder
+//! - [`pngx`]: bit-exact PNG recompression
+//! - [`deflate`] / [`inflate`]: own Deflate implementation, bit-exact with zlib 1.4
+//! - [`jpgx`]: bit-exact JPEG recompression
+//! - [`archive`]: archive format, packing, unpacking
 //!
-//! Ohne das Test-Feature `cref` enthält die Bibliothek keinerlei `unsafe` (vom Compiler erzwungen)
-//! und keinen C-Code.
+//! Without the test feature `cref` the library contains no `unsafe` at all (enforced by the
+//! compiler) and no C code.
 #![cfg_attr(not(feature = "cref"), forbid(unsafe_code))]
 #![forbid(unsafe_op_in_unsafe_fn)]
-// Stilfragen: Indexschleifen spiegeln die Struktur der Referenz (Differenztests gegen C);
-// `x % n == 0` statt `is_multiple_of` hält ältere Rust-Versionen kompatibel.
+// Style: index loops mirror the structure of the reference (differential tests against C);
+// `x % n == 0` instead of `is_multiple_of` keeps older Rust versions compatible.
 #![allow(clippy::needless_range_loop, clippy::manual_is_multiple_of, clippy::should_implement_trait)]
 
 pub mod archive;
@@ -29,7 +29,7 @@ pub mod lzrc;
 pub mod pngx;
 pub mod pxc;
 pub mod tcm;
-/// Echte zlib (C) als Referenz, nur für Differenztests.
+/// Real zlib (C) as a reference, only for differential tests.
 #[cfg(feature = "cref")]
 pub mod zlib;
 

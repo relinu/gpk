@@ -1,4 +1,4 @@
-//! FFI zur C-Referenz (nur mit Feature `cref`, für Differenztests).
+//! FFI to the C reference (only with feature `cref`, for differential tests).
 #![allow(dead_code)]
 use std::os::raw::c_int;
 
@@ -43,15 +43,15 @@ extern "C" {
     pub fn jpgx_inverse(t: *const u8, tn: usize, out: *mut u8, origsize: usize) -> c_int;
 }
 
-/// Von C mit malloc erzeugten Puffer als Vec übernehmen (kopiert, gibt frei).
+/// Take over a buffer allocated by C with malloc as a Vec (copies, then frees it).
 ///
 /// # Safety
-/// `p` ist null oder zeigt auf `n` gültige Bytes, die mit `malloc` angelegt wurden und danach nicht mehr benutzt werden.
+/// `p` is null or points to `n` valid bytes allocated with `malloc` that are not used afterwards.
 pub unsafe fn take(p: *mut u8, n: usize) -> Option<Vec<u8>> {
     if p.is_null() {
         return None;
     }
-    // SAFETY: p zeigt auf n gültige Bytes aus malloc der C-Referenz.
+    // SAFETY: p points to n valid bytes from malloc in the C reference.
     let v = unsafe { std::slice::from_raw_parts(p, n).to_vec() };
     unsafe { libc::free(p as *mut libc::c_void) };
     Some(v)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Erzeugt deterministische PNG- und JPEG-Testbilder für die Differenztests (benötigt Pillow).
+"""Creates deterministic PNG and JPEG test images for the differential tests (needs Pillow).
 
-  gen_testimages.py <png-ordner> <jpeg-ordner>
+  gen_testimages.py <png-dir> <jpeg-dir>
 
-PNG: verschiedene Farbmodi, Bittiefen, zlib-Stufen und Filter.
-JPEG: Baseline mit verschiedenen Qualitäten, Unterabtastungen, Restart-Intervallen,
-optimierten Huffman-Tabellen und Graustufen; außerdem progressiv (muss abgelehnt werden).
+PNG: different color modes, bit depths, zlib levels and filters.
+JPEG: baseline with different qualities, subsamplings, restart intervals, optimized Huffman
+tables and grayscale; also progressive (must be rejected).
 """
 import math
 import os
@@ -44,7 +44,7 @@ def main():
             for sub in (0, 1, 2):
                 base.save(os.path.join(jpg_dir, f"q{q}_s{sub}_{seed}.jpg"), quality=q, subsampling=sub)
         base.save(os.path.join(jpg_dir, f"opt_{seed}.jpg"), quality=85, optimize=True)
-        base.convert("L").save(os.path.join(jpg_dir, f"grau_{seed}.jpg"), quality=80)
+        base.convert("L").save(os.path.join(jpg_dir, f"gray_{seed}.jpg"), quality=80)
         base.save(os.path.join(jpg_dir, f"prog_{seed}.jpg"), quality=80, progressive=True)
         try:
             base.save(os.path.join(jpg_dir, f"rst_{seed}.jpg"), quality=80, restart_marker_blocks=4)
