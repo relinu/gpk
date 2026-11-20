@@ -1,19 +1,20 @@
-# Kompilierte Programme
-/bench
-/fuzz
-gpk/gpk
-gpk/zstdtool
-gpk/tests/*
-!gpk/tests/*.c
-!gpk/tests/*.h
-*.o
+# Rust
+/target/
 
-# Erzeugte Testdaten (reproduzierbar per gen_corpus.py / make_build.py)
+# C-Referenz (legacy-c): kompilierte Programme
+legacy-c/bench
+legacy-c/fuzz_asan
+legacy-c/gpk/gpk
+legacy-c/gpk/zstdtool
+legacy-c/gpk/tests/*
+!legacy-c/gpk/tests/*.c
+!legacy-c/gpk/tests/*.h
+*.o
+*.exe
+
+# Erzeugte Testdaten (reproduzierbar per tools/gen_corpus.py / tools/make_build.py)
 /corpus/
-gpk/testbuild/
+testbuild/
 *.gpk
 *.log
-
-# Windows
-*.exe
 .wine/
