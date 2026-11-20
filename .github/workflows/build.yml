@@ -23,8 +23,46 @@ env:
   RUST: 1.97.0
 
 jobs:
+  linux-tests:
+    # Runs in parallel to the other jobs: the differential tests are the longest step
+    name: Linux tests (differential tests against C and zlib)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install $RUST --profile minimal
+          rustup default $RUST
+
+      - name: Dependencies (test images)
+        timeout-minutes: 5
+        run: |
+          # Try the runner's existing package lists first; refresh them (slow) only if that fails
+          APT="sudo apt-get -o Acquire::Retries=3"
+          $APT install -y --no-install-recommends python3-pil || { $APT update && $APT install -y --no-install-recommends python3-pil; }
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-tests-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: linux-tests-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Create test images
+        run: python3 tools/gen_testimages.py testimages/png testimages/jpg
+
+      - name: Tests and differential tests against the C reference and zlib (byte-identical)
+        env:
+          GPK_PNG_DIR: ${{ github.workspace }}/testimages/png
+          GPK_JPEG_DIR: ${{ github.workspace }}/testimages/jpg
+        run: cargo test --profile ci --features cref,xz
+
   linux:
-    name: Linux (Rust)
+    name: Linux (build, lint, smoke tests)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -36,11 +74,11 @@ jobs:
           rustup default $RUST
           cargo --version
 
-      - name: Dependencies (C reference, test images)
+      - name: Dependencies (C reference)
         timeout-minutes: 5
         run: |
           # Try the runner's existing package lists first; refresh them (slow) only if that fails
-          PKGS="zlib1g-dev liblzma-dev python3-pil"
+          PKGS="zlib1g-dev liblzma-dev"
           APT="sudo apt-get -o Acquire::Retries=3"
           $APT install -y --no-install-recommends $PKGS || { $APT update && $APT install -y --no-install-recommends $PKGS; }
 
@@ -62,15 +100,6 @@ jobs:
         run: |
           cargo clippy --all-targets
           cargo clippy --all-targets --features cref,xz
-
-      - name: Create test images
-        run: python3 tools/gen_testimages.py testimages/png testimages/jpg
-
-      - name: Tests and differential tests against the C reference and zlib (byte-identical)
-        env:
-          GPK_PNG_DIR: ${{ github.workspace }}/testimages/png
-          GPK_JPEG_DIR: ${{ github.workspace }}/testimages/jpg
-        run: cargo test --profile ci --features cref,xz
 
       - name: Tests in debug mode (overflow checks enabled)
         run: cargo test --lib
@@ -185,7 +214,7 @@ jobs:
     name: Publish release files
     # Only for tags and published releases, and only if all builds and tests are green
     if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows-exe]
+    needs: [linux, linux-tests, windows-exe]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
