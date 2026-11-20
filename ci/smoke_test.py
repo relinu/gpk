@@ -150,8 +150,8 @@ def main():
             fail("Entpacktes weicht ab:\n  " + "\n  ".join(errs))
         if "PNG-Rekompression: 1" not in log:
             fail("PNG-Rekompression war nicht aktiv")
-        if "x86-bcj" not in log:
-            fail("x86-BCJ-Filter war nicht aktiv")
+        if "x86-bcj" not in log and "x86-split" not in log:
+            fail("x86-Filter war nicht aktiv")
 
         data = bytearray(open(arch, "rb").read())
         data[len(data) // 2] ^= 0xFF

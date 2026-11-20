@@ -12,6 +12,7 @@ enum {
     FT_BCJ,        /* x86/x64: relative CALL/JMP-Ziele -> absolut (EXE, DLL, SO)    */
     FT_SPLIT,      /* Datensätze in Feld-Streams zerlegen (BC1/BC3-Texturblöcke)    */
     FT_WPRED,      /* Vorhersage auf 16/32-Bit-Werten + Byte-Planes (Floats, PCM)   */
+    FT_X86S,       /* x86 mit getrennten Strömen: Code | Sprungziele (BCJ2-Prinzip) */
     FT_COUNT
 };
 

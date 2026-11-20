@@ -37,6 +37,7 @@
 #endif
 #include "platform.h"
 #include "lzrc.h"
+#include "tcm.h"
 #include "filters.h"
 #include "pngx.h"
 #include "../glz.h"
@@ -47,7 +48,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t
 #define SAMPLE      (384u << 10)   /* Stichprobe für Filter-Probeläufe */
 #define HDR_SIZE    (4 + 8 + 8 + 8 + 1)
 
-enum { CODEC_STORED = 0, CODEC_LZRC = 1, CODEC_XZ = 2 };
+enum { CODEC_STORED = 0, CODEC_LZRC = 1, CODEC_XZ = 2, CODEC_TCM = 3 };
 enum { CL_TEXT, CL_EXE, CL_TEXTURE, CL_BINARY, CL_RAW, CL_N };
 static const char *const CLASS_NAMES[CL_N] = {"Text/Skripte", "x86-Programmcode", "BCn-Texturen (DDS)", "sonstige Binärdaten", "bereits komprimiert"};
 enum { E_FILE = 0, E_DIR = 1, E_LINK = 2 };
@@ -66,6 +67,7 @@ static int g_threads = 4, g_level = 9;
 static const u64 g_block_max_ssize = 1ull << 30;
 static int opt_filter = 1, opt_sort = 1, opt_dedup = 1, opt_raw = 1, opt_codec = CODEC_LZRC;
 static double opt_max_ram_gb = 0;            /* 0 = keine Vorgabe */
+static int opt_cm = 1;                       /* Text-Kern TCM für Textblöcke */
 
 /* ---------------- Datenstrukturen ---------------- */
 typedef struct { char *path; int type; u32 mode; i64 mtime; u64 size; u32 crc; u32 content; char *link; } Entry;
@@ -326,7 +328,7 @@ static void classify_one(u32 ci, void *ctx) {
     add_cand(cand, &nc, f0);
     if (opt_filter) {
         fspec t;
-        if (is_x86(d, n)) { c->cls = CL_EXE; t = f0; t.id = FT_BCJ; add_cand(cand, &nc, t); }
+        if (is_x86(d, n)) { c->cls = CL_EXE; t = f0; t.id = FT_BCJ; add_cand(cand, &nc, t); t.id = FT_X86S; add_cand(cand, &nc, t); }
         else if (dds_split(d, n, &t)) { c->cls = CL_TEXTURE; add_cand(cand, &nc, t); }
         else {
             /* Stride-Erkennung: die zwei Abstände mit der kleinsten Delta-Entropie */
@@ -393,9 +395,12 @@ static void build_blocks(const u32 *order, int raw) {
     for (u32 k = 0; k < nC; k++) {
         Content *c = &C[order[k]];
         if ((c->cls == CL_RAW) != raw) continue;
+        /* Text mit Context-Mixing-Kern: kleinere Blöcke (8 MiB) für paralleles Entpacken –
+         * gemessen ohne Verlust an Kompression, da das Modell schnell lernt */
+        u64 cap = (opt_cm && opt_codec == CODEC_LZRC && c->cls == CL_TEXT && g_block > (8ull << 20)) ? (8ull << 20) : g_block;
         for (u64 off = 0; off < c->ssize;) {
-            u32 len = (u32)((c->ssize - off) < g_block ? (c->ssize - off) : g_block);
-            if (!b || (b->usize + len > g_block && b->np)) b = new_block(raw ? CODEC_STORED : opt_codec);
+            u32 len = (u32)((c->ssize - off) < cap ? (c->ssize - off) : cap);
+            if (!b || (b->usize + len > cap && b->np)) b = new_block(raw ? CODEC_STORED : opt_codec);
             add_piece(b, order[k], off, len);
             off += len;
         }
@@ -425,6 +430,14 @@ static void compress_block(u32 bi, void *ctx) {
         size_t cap = lzrc_bound(b->usize);
         out = xmalloc(cap);
         cs = lzrc_compress(buf, b->usize, out, cap, &pr);
+        /* Überwiegend Text: zusätzlich mit dem Context-Mixing-Kern versuchen, kleineres Ergebnis nehmen */
+        if (opt_cm && text * 2 > b->usize) {
+            size_t tcap = tcm_bound(b->usize);
+            u8 *tout = xmalloc(tcap);
+            size_t ts = tcm_compress(buf, b->usize, tout, tcap);
+            if (ts && (!cs || ts < cs)) { free(out); out = tout; cs = ts; b->codec = CODEC_TCM; }
+            else free(tout);
+        }
     }
 #ifndef GPK_NO_XZ
     else if (b->codec == CODEC_XZ) {
@@ -436,7 +449,7 @@ static void compress_block(u32 bi, void *ctx) {
     if (!cs || cs >= b->usize) { free(out); b->codec = CODEC_STORED; b->cdata = buf; b->csize = b->usize; }
     else { free(buf); b->cdata = out; b->csize = cs; }
     fprintf(stderr, "  Block %3u/%u: %7.1f MB -> %7.1f MB  (%s)\n", bi + 1, nB, b->usize / 1e6, b->csize / 1e6,
-            b->codec == CODEC_STORED ? "gespeichert" : b->codec == CODEC_LZRC ? "LZRC" : "xz");
+            b->codec == CODEC_STORED ? "gespeichert" : b->codec == CODEC_LZRC ? "LZRC" : b->codec == CODEC_TCM ? "Text-CM" : "xz");
     /* Fertig: alle lückenlos fertigen Blöcke sofort ins Archiv schreiben und freigeben */
     pthread_mutex_lock(&g_wmx);
     b->done = 1;
@@ -723,6 +736,7 @@ static void extract_block(u32 bi, void *vctx) {
     if (!ok) { fprintf(stderr, "gpk: Block %u nicht lesbar\n", bi); atomic_store(&x->failed, 1); free(src); free(buf); return; }
     if (b->codec == CODEC_STORED) { if (b->csize != b->usize) ok = 0; else memcpy(buf, src, b->usize); }
     else if (b->codec == CODEC_LZRC) ok = lzrc_decompress(src, b->csize, buf, b->usize);
+    else if (b->codec == CODEC_TCM) ok = tcm_decompress(src, b->csize, buf, b->usize);
 #ifndef GPK_NO_XZ
     else if (b->codec == CODEC_XZ) {
         uint64_t mem = UINT64_MAX; size_t ip = 0, op = 0;
@@ -842,6 +856,7 @@ static void usage(void) {
         "  -b MiB       Blockgröße (Standard 64)\n"
         "  --max-ram GB Speicherbudget: Threads und ggf. Blockgröße werden passend gewählt\n"
         "  --xz         xz/LZMA2 statt LZRC als Kern (Vergleich)\n"
+        "  --no-cm      Text-Kern (Context Mixing) aus: schneller entpacken, Text größer\n"
         "  --no-filter --no-sort --no-dedup --no-raw   einzelne Stufen abschalten\n"
         "  --no-preproc alle Vorverarbeitungsstufen abschalten\n");
     exit(2);
@@ -866,6 +881,7 @@ int main(int argc, char **argv) {
 #endif
         }
         else if (!strcmp(s, "--no-filter")) opt_filter = 0;
+        else if (!strcmp(s, "--no-cm")) opt_cm = 0;
         else if (!strcmp(s, "--no-sort")) opt_sort = 0;
         else if (!strcmp(s, "--no-dedup")) opt_dedup = 0;
         else if (!strcmp(s, "--no-raw")) opt_raw = 0;

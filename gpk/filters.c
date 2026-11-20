@@ -4,7 +4,7 @@
 
 typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 
-const char *const FILTER_NAMES[FT_COUNT] = {"none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "wort-praediktion"};
+const char *const FILTER_NAMES[FT_COUNT] = {"none", "delta", "shuffle", "shuffle+delta", "x86-bcj", "split", "wort-praediktion", "x86-split"};
 
 static inline u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
 static inline void wr32(u8 *p, u32 v) { memcpy(p, &v, 4); }
@@ -44,6 +44,53 @@ static void bcj(u8 *b, size_t n, u64 off, int enc) {
             }
             i += 5;
         } else i++;
+    }
+}
+
+/* ---- x86 mit getrennten Strömen (BCJ2-Prinzip) -----------------------
+ * CALL (E8), JMP (E9) und bedingte Sprünge (0F 80..8F) haben einen 4-Byte-
+ * Operanden. Diese Operanden werden aus dem Code herausgelöst und gesammelt
+ * ans Ende geschrieben (rückwärts aufgereiht, damit der Decoder keine
+ * Längenangabe braucht; Gesamtlänge bleibt gleich). Dort stehen sie als
+ * absolute Ziele in Big Endian: Aufrufe derselben Funktion werden identisch,
+ * und im Code-Strom bleiben nur die Befehlsbytes, die LZ besser findet.
+ * Die Absolut-Umrechnung nutzt dieselbe bijektive 25-Bit-Regel wie FT_BCJ. */
+static inline u32 x86_abs(u32 v, u32 pos, int enc) {
+    if ((v >> 24) != 0x00 && (v >> 24) != 0xFF) return v;     /* kein kleiner Sprung: unverändert */
+    v = enc ? v + pos : v - pos;
+    v &= 0x01FFFFFFu;
+    if (v & 0x01000000u) v |= 0xFE000000u;
+    return v;
+}
+static inline void wr_be32(u8 *p, u32 v) { p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16); p[2] = (u8)(v >> 8); p[3] = (u8)v; }
+static inline u32 rd_be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
+
+static void x86s_enc(const u8 *in, u8 *out, size_t n, u64 off) {
+    size_t i = 0, mp = 0, k = 0;
+    while (i < n) {
+        size_t ol = 0;
+        if ((in[i] & 0xFE) == 0xE8 && i + 5 <= n) ol = 1;
+        else if (in[i] == 0x0F && i + 6 <= n && (in[i + 1] & 0xF0) == 0x80) ol = 2;
+        if (!ol) { out[mp++] = in[i++]; continue; }
+        memcpy(out + mp, in + i, ol); mp += ol;
+        u32 v = rd32(in + i + ol);
+        v = x86_abs(v, (u32)(off + i + ol + 4), 1);
+        wr_be32(out + n - 4 * (++k), v);
+        i += ol + 4;
+    }
+}
+static void x86s_dec(const u8 *in, u8 *out, size_t n, u64 off) {
+    size_t i = 0, mp = 0, k = 0;
+    while (i < n) {
+        u8 b = in[mp];
+        size_t ol = 0;
+        if ((b & 0xFE) == 0xE8 && i + 5 <= n) ol = 1;
+        else if (b == 0x0F && i + 6 <= n && (in[mp + 1] & 0xF0) == 0x80) ol = 2;
+        if (!ol) { out[i++] = in[mp++]; continue; }
+        memcpy(out + i, in + mp, ol); mp += ol;
+        u32 v = rd_be32(in + n - 4 * (++k));
+        wr32(out + i + ol, x86_abs(v, (u32)(off + i + ol + 4), 0));
+        i += ol + 4;
     }
 }
 
@@ -124,6 +171,7 @@ void filter_encode(const fspec *f, const u8 *in, u8 *out, size_t n, u64 off) {
         break;
     case FT_BCJ: memcpy(out, in, n); bcj(out, n, off, 1); break;
     case FT_SPLIT: split_enc(f, in, out, n, off); break;
+    case FT_X86S: x86s_enc(in, out, n, off); break;
     case FT_WPRED: {
         u8 *t = malloc(n ? n : 1);
         memcpy(t, in, n); wpred_core(f, t, n, 1);
@@ -148,6 +196,7 @@ void filter_decode(const fspec *f, u8 *in, u8 *out, size_t n, u64 off) {
         break;
     case FT_BCJ: memcpy(out, in, n); bcj(out, n, off, 0); break;
     case FT_SPLIT: split_dec(f, in, out, n, off); break;
+    case FT_X86S: x86s_dec(in, out, n, off); break;
     case FT_WPRED:
         unshuffle(in, out, n, f->fields[2] ? s : f->fields[0]);
         wpred_core(f, out, n, 0);
