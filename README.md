@@ -108,15 +108,22 @@ are skipped and Unix permissions are not set.
 ## CI
 
 `.github/workflows/build.yml` runs on every push to `main` and `rust-port` and on pull
-requests, exclusively on Ubuntu runners (no Windows VM):
+requests (documentation-only changes are skipped), exclusively on Ubuntu runners (no Windows
+VM). Three jobs run in parallel; a full run takes about 1.5–2 minutes:
 
-- **Linux:** `cargo fmt`/`clippy`, tests and differential tests against the C reference and the
-  real zlib, check "no C code in the default build", optional xz core, tests in debug mode
-  (overflow checks), smoke test (pack, unpack, compare bit-exactly, a corrupted archive must be
-  rejected), identical archives with 1 and 4 threads, cross-unpacking C ↔ Rust
+- **Linux tests:** unit tests and differential tests against the C reference and the real zlib
+  (with a fast-compiling optimized profile `ci`)
+- **Linux build:** `cargo fmt`/`clippy`, check "no C code in the default build", optional xz
+  core, tests in debug mode (overflow checks), smoke test (pack, unpack, compare bit-exactly, a
+  corrupted archive must be rejected), identical archives with 1 and 4 threads, cross-unpacking
+  C ↔ Rust
 - **Windows .exe:** cross build, unit and smoke tests of the `.exe` under Wine, archive exchange
   Linux → Windows and Windows → Linux
 - The finished programs (`gpk`, `gpk.exe`) are available as artifacts of each run.
+
+Speed and robustness: per-commit Rust caches (restored from the latest one), packages are
+installed from the runner's package lists (refreshed only on failure, without recommended
+packages, 5-minute timeout), and a new push cancels the still running run of the same branch.
 
 ## Releases
 
