@@ -320,5 +320,37 @@ write("README.txt", ("MyGame – Installationshinweise\n" * 40).encode())
 write("EULA.txt", (" ".join(vocab["en"]) * 300).encode())
 os.makedirs(path("saves", ".keep").rsplit("/", 1)[0], exist_ok=True)
 
+# JPEG-Bilder: Ladebildschirme, Konzeptgrafiken, UI-Hintergründe (fotoähnlich).
+# Werden zuletzt erzeugt, damit alle übrigen Dateien unverändert bleiben;
+# braucht Pillow, mit --ohne-jpeg abschaltbar (alter Build-Inhalt).
+if "--ohne-jpeg" not in sys.argv:
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+        print("Hinweis: Pillow fehlt, keine JPEG-Dateien erzeugt")
+    if Image is not None:
+        def landscape(w, h, seed):
+            r = np.random.default_rng(seed)
+            yy, xx = np.mgrid[0:h, 0:w] / h
+            sky = np.stack([0.35 + 0.3 * yy, 0.5 + 0.3 * yy, 0.85 - 0.1 * yy], -1) * r.uniform(0.7, 1.1, 3)
+            hz = 0.45 + 0.15 * noise(1, w, 5, 4)[0] * r.uniform(0.5, 1.5)
+            ground = (yy > hz[None, :])[..., None]
+            tex = noise(h, w, 6, 6)[..., None]
+            land = (np.array([0.25, 0.4, 0.15]) + 0.25 * r.random(3)) * (0.6 + 0.6 * tex)
+            img = np.where(ground, land, sky)
+            for _ in range(int(r.integers(3, 9))):          # Bäume/Felsen/Gebäude
+                cx, cy, rad = r.random(), r.uniform(0.4, 0.9), r.uniform(0.02, 0.12)
+                m = ((xx - cx * w / h) ** 2 + ((yy - cy) * 1.6) ** 2) < rad ** 2
+                img[m] = img[m] * 0.4 + r.random(3) * 0.6 * (0.7 + 0.3 * tex[m])
+            img += r.normal(0, 0.012, img.shape)
+            return Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
+        for i in range(10):
+            landscape(1920, 1080, 100 + i).save(path("MyGame_Data", "UI", "Loading", f"loading_{i:02d}.jpg"), quality=90)
+        for i in range(6):
+            landscape(2048, 1536, 200 + i).save(path("MyGame_Data", "Art", f"concept_{i:02d}.jpg"), quality=92, subsampling=0)
+        for i in range(20):
+            landscape(1024, 512, 300 + i).save(path("MyGame_Data", "UI", "Backgrounds", f"menu_bg_{i:02d}.jpg"), quality=85)
+
 size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(OUT) for f in fs if not os.path.islink(os.path.join(d, f)))
 print(f"Build fertig: {OUT}, {size/1e6:.1f} MB")
