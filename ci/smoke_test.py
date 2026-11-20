@@ -14,6 +14,7 @@ Außerdem muss ein beschädigtes Archiv mit Fehler abgelehnt werden.
 import argparse
 import math
 import os
+import re
 import shutil
 import stat
 import struct
@@ -44,6 +45,10 @@ def make_tree(root, with_system_files):
     verts = b"".join(struct.pack("<8f", i * 0.5, math.sin(i * 0.01) * 10, i * 0.25, 0, 1, 0, (i % 64) / 64, (i // 64) / 64)
                      for i in range(40000))
     write(os.path.join(root, "data", "mesh.bin"), verts)
+    # JPEG aus den eingebetteten Testdaten (kein Pillow nötig): größtes Beispiel
+    hdr = open(os.path.join(REPO, "gpk", "tests", "sample_jpegs.h")).read()
+    jpgs = [bytes(int(v) for v in m.group(1).split(",")) for m in re.finditer(r"SAMPLE_JPEG\d\[\d+\] = \{([0-9,]+)\}", hdr)]
+    write(os.path.join(root, "data", "ui", "loading.jpg"), max(jpgs, key=len))
     write(os.path.join(root, "data", "leer.txt"), b"")
     os.makedirs(os.path.join(root, "leerer ordner"), exist_ok=True)
     for name in sorted(os.listdir(os.path.join(REPO, "gpk"))):
@@ -126,7 +131,9 @@ def main():
         build = os.path.join(w, "build")
         if a.cross_pack:
             make_tree(build, False)
-            run(gpk, "c", "-t", "2", build, os.path.abspath(a.cross_pack))
+            log = run(gpk, "c", "-t", "2", build, os.path.abspath(a.cross_pack)).stderr
+            if "(Text-CM)" not in log or "JPEG-Rekompression: 1" not in log or "PNG-Rekompression: 1" not in log:
+                fail("Systemwechsel-Archiv deckt Text-Kern, JPEG und PNG nicht ab:\n" + log)
             print(f"Archiv für den Systemwechsel-Test erzeugt: {a.cross_pack}")
             return
         if a.cross_extract:
@@ -150,6 +157,10 @@ def main():
             fail("Entpacktes weicht ab:\n  " + "\n  ".join(errs))
         if "PNG-Rekompression: 1" not in log:
             fail("PNG-Rekompression war nicht aktiv")
+        if "(Text-CM)" not in log:
+            fail("Text-Kern (Context Mixing) wurde nicht benutzt")
+        if "JPEG-Rekompression: 1" not in log:
+            fail("JPEG-Rekompression war nicht aktiv")
         if "x86-bcj" not in log and "x86-split" not in log:
             fail("x86-Filter war nicht aktiv")
 

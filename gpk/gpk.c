@@ -312,7 +312,15 @@ static void xform_one(u32 ci, void *ctx) {
         size_t tn = 0; u8 *t = jpgx_forward(v.p, c->size, &tn);
         view_close(&v);
         if (!t) return;
-        if (tn > g_block || tn > c->size * 0.97) { free(t); return; }
+        /* Kleine JPEGs: Kopf (Tabellen) komprimiert LZRC besser -> nur übernehmen, wenn es gewinnt */
+        size_t base = c->size;
+        if (tn <= g_block && tn <= c->size * 0.97 && c->size < (1u << 20)) {
+            View v2 = view_original(c);
+            size_t lz = lz_estimate(v2.p, c->size, 0);
+            view_close(&v2);
+            if (lz < base) base = lz;
+        }
+        if (tn > g_block || tn > base * 0.97) { free(t); return; }
         c->spill_off = spill_write(t, tn);
         c->xform = XF_JPG; c->ssize = tn;
         free(t);
@@ -425,6 +433,7 @@ static void add_piece(Block *b, u32 ci, u64 off, u32 len) {
 }
 static void build_blocks(const u32 *order, int raw) {
     Block *b = NULL;
+    int last_text = 0;
     for (u32 k = 0; k < nC; k++) {
         Content *c = &C[order[k]];
         if ((c->cls == CL_RAW) != raw) continue;
@@ -433,7 +442,11 @@ static void build_blocks(const u32 *order, int raw) {
         u64 cap = (opt_cm && opt_codec == CODEC_LZRC && c->cls == CL_TEXT && g_block > (8ull << 20)) ? (8ull << 20) : g_block;
         for (u64 off = 0; off < c->ssize;) {
             u32 len = (u32)((c->ssize - off) < cap ? (c->ssize - off) : cap);
-            if (!b || (b->usize + len > cap && b->np)) b = new_block(raw ? CODEC_STORED : opt_codec);
+            /* Text und Nicht-Text nicht mischen: reine Textblöcke bekommen den Text-Kern */
+            int is_text = c->cls == CL_TEXT;
+            if (!b || (b->usize + len > cap && b->np) || (b->np && is_text != last_text))
+                b = new_block(raw ? CODEC_STORED : opt_codec);
+            last_text = is_text;
             add_piece(b, order[k], off, len);
             off += len;
         }
