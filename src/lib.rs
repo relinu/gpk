@@ -12,6 +12,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod filters;
+pub mod glz;
+pub mod lzrc;
 pub mod zlib;
 
 #[cfg(feature = "cref")]
