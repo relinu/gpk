@@ -5,6 +5,7 @@ gpk/gpk
 gpk/zstdtool
 gpk/tests/*
 !gpk/tests/*.c
+!gpk/tests/*.h
 *.o
 
 # Erzeugte Testdaten (reproduzierbar per gen_corpus.py / make_build.py)
