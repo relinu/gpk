@@ -12,6 +12,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Feste Rust-Version: neue Clippy-Regeln späterer Versionen brechen die CI nicht unbemerkt
+  RUST: 1.97.0
 
 jobs:
   linux:
@@ -22,8 +24,8 @@ jobs:
 
       - name: Rust-Werkzeuge
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install $RUST --profile minimal --component clippy,rustfmt
+          rustup default $RUST
           cargo --version
 
       - name: Abhängigkeiten (C-Referenz, Testbilder)
@@ -93,8 +95,8 @@ jobs:
 
       - name: Rust-Werkzeuge mit Windows-Ziel
         run: |
-          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu
-          rustup default stable
+          rustup toolchain install $RUST --profile minimal --target x86_64-pc-windows-gnu
+          rustup default $RUST
 
       - name: Abhängigkeiten installieren
         run: |

@@ -297,17 +297,16 @@ impl<'a> Rcd<'a> {
     #[inline]
     fn bit(&mut self, p: &mut u16) -> u32 {
         let bound = (self.range >> 11) * *p as u32;
-        let b;
-        if self.code < bound {
+        let b = if self.code < bound {
             self.range = bound;
             *p += (2048 - *p) >> 5;
-            b = 0;
+            0
         } else {
             self.code -= bound;
             self.range -= bound;
             *p -= *p >> 5;
-            b = 1;
-        }
+            1
+        };
         if self.range < (1 << 24) {
             self.range <<= 8;
             self.code = (self.code << 8) | self.next() as u32;

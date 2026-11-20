@@ -1342,10 +1342,11 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
             }
             continue;
         }
-        set_mode(&f, e.mode);
+        // Zeitstempel vor den Rechten setzen: danach kann die Datei schreibgeschützt sein
         if e.typ == E_FILE {
-            let _ = filetime::set_file_mtime(&f, filetime::FileTime::from_unix_time(e.mtime, 0));
+            set_mtime(&f, e.mtime);
         }
+        set_mode(&f, e.mode);
     }
     let dt = t0.elapsed().as_secs_f64();
     let total: u64 = a.entries.iter().filter(|e| e.typ == E_FILE).map(|e| e.size).sum();
@@ -1360,6 +1361,15 @@ pub fn extract(archive: &Path, outdir: &Path, threads: usize) -> Result<()> {
         total as f64 / dt / 1e6
     );
     Ok(())
+}
+
+/// Änderungszeit setzen (Sekunden seit 1970, auch negativ).
+fn set_mtime(p: &Path, secs: i64) {
+    let d = std::time::Duration::from_secs(secs.unsigned_abs());
+    let t = if secs >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) };
+    if let (Some(t), Ok(f)) = (t, fs::OpenOptions::new().write(true).open(p)) {
+        let _ = f.set_modified(t);
+    }
 }
 
 #[cfg(unix)]
