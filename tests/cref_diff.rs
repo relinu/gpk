@@ -211,3 +211,33 @@ fn pngx_identisch_zu_c() {
     eprintln!("PNG: {tested} Prüfungen, {converted} umgewandelt");
     assert!(converted > 0 || files.is_empty());
 }
+
+#[test]
+fn jpgx_identisch_zu_c() {
+    // Testsatz aus der JPEG-Entwicklung (falls vorhanden) + Go-Testdaten
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["/tmp/claude-0/-home-user-gpk/dfd70ffa-0d0f-5554-bc5a-49a1ae02f184/scratchpad/jpgtest", "/usr/local/go1.25.1/src/image/testdata"] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            files.extend(rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jpg" || e == "jpeg")));
+        }
+    }
+    files.sort();
+    let (mut ok, mut rejected) = (0, 0);
+    for f in &files {
+        let jpg = std::fs::read(f).unwrap();
+        let rust = gpk::jpgx::forward(&jpg);
+        let mut tn = 0usize;
+        let c = take(unsafe { jpgx_forward(jpg.as_ptr(), jpg.len(), &mut tn) }, tn);
+        assert_eq!(rust.is_some(), c.is_some(), "Akzeptanz weicht ab: {}", f.display());
+        match (&rust, &c) {
+            (Some(rv), Some(cv)) => {
+                assert!(rv == cv, "JPGX weicht ab: {}", f.display());
+                let mut out = vec![0u8; jpg.len()];
+                assert!(gpk::jpgx::inverse(cv, &mut out) && out == jpg);
+                ok += 1;
+            }
+            _ => rejected += 1,
+        }
+    }
+    eprintln!("JPEG: {ok} bytegleich umgewandelt, {rejected} von beiden abgelehnt");
+}
