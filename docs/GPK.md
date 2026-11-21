@@ -70,11 +70,14 @@ make packing slower or the archive slightly larger.
 6. **Compress** in independent 64 MiB blocks, in parallel, with **LZRC**
    (LZ77 + binary-tree match finder + optimal parsing + adaptive range coder, LZMA principle,
    own implementation) – optionally `--xz` as the core (only with `--features xz`).
-   **Text blocks** (4 MiB, pure text) are coded with the context-mixing core **TCM**
+   **Text blocks** (2 MiB, pure text) are coded with the context-mixing core **TCM**
    (orders 0–6, word, column and match models, two mixers, two APM stages); LZRC is only also
    tried there if a fast estimate gives it a chance (almost never on text). Can be disabled
-   with `--no-cm`. TCM unpacks only ~1.5 MB/s per thread; 4 instead of 8 MiB costs +0.45 %
-   text size but spreads unpacking over more threads.
+   with `--no-cm`. TCM unpacks only ~1–1.5 MB/s per thread, so the largest text block bounds
+   the unpacking time on many cores: 4 instead of 8 MiB cost +0.45 % text size, 2 instead of
+   4 MiB another +0.04 % of the archive (test build: +54 KB) and halves the longest block.
+   Stored blocks hold at most 2 MiB of PNG/JPEG transformations, so that their inverse
+   (pixel and coefficient decoding) is also spread over the threads.
 
 All cores use **integers only**: Linux and Windows create and read the same archives
 bit-identically (checked in CI: Linux ↔ Windows .exe under Wine).
@@ -89,9 +92,8 @@ bit-identically (checked in CI: Linux ↔ Windows .exe under Wine).
   trial-compressed. Measured: classification 21.3 → 12.5 s, archive +2.5 KB.
 - **Order**: when packing, classifying and unpacking, the most expensive tasks run first
   (text CM blocks are ~40× more expensive than LZRC) so that no large chunk runs alone at the end.
-- Tried and discarded (no measurable gain): micro-optimizations and SSE4.2/AVX2 in the text
-  core (the core is bound by the serial dependency per bit), other parse windows, price update
-  intervals and search depths in the LZRC encoder (all within ±0.1 %).
+- Tried and discarded (no measurable gain): other parse windows, price update intervals and
+  search depths in the LZRC encoder (all within ±0.1 %).
 - Limit when packing: a single 64 MiB LZRC block alone takes ~45 s (the binary tree grows to
   0.5 GB and the search gets slower); with large blocks it determines the minimum duration.
 
@@ -100,6 +102,43 @@ bit-identically (checked in CI: Linux ↔ Windows .exe under Wine).
 | Archive | 120,266,104 B | 120,278,468 B (+0.01 %) |
 | Pack | 92.8 s, 1.46 GB RAM | 64.3 s, 1.67 GB RAM |
 | Unpack | 8.3 s, 0.44 GB RAM | 6.8 s, 0.61 GB RAM |
+
+### Unpacking
+
+Unpacking matters more than packing (it runs on every player's machine). All changes keep the
+archive format; the kernels stay byte-identical to the C reference.
+
+- **Text core (TCM)**: ~75 % of the unpacking CPU time. It is not memory-bound (tables of
+  64 KB instead of 112 MB were only ~6 % faster) but bound by the instruction count per bit.
+  Removed: bounds checks and the double indirection of the hash tables (one table array with
+  a power-of-two size and masked row indices, the order-0 rows live in its spare part),
+  `squash`/`stretch∘squash` as direct lookup tables instead of interpolation, fixed-size
+  mixer and APM tables, balanced dot-product sums. 845 → 690 instructions per bit, ~13–15 %
+  faster. A copy of the current rows into a working buffer was slower (store forwarding).
+  Compiling for AVX2 (`-C target-cpu=native`) would give another ~10 %, but releases target
+  baseline x86-64 and a runtime CPU dispatch would need `unsafe`.
+- **LZRC decoder**: literal and tree bits are decoded without data-dependent branches
+  (select masks instead of `if`), the matched literal uses the offset trick of the LZMA SDK.
+  +10–20 % (now 60–70 MB/s; xz/liblzma: ~50 MB/s on the same data).
+- **PNG pixel coder (PXC)**: the per-predictor weights `2^40 / e²` come from a table for
+  e < 1024, the remaining 64-bit divisions are done exactly in f64 (proof in the code). ~5 %
+  here; much more on CPUs with slow 64-bit `idiv` (up to ~90 cycles before Ice Lake/Zen 2).
+- **JPEG**: Huffman bit writer with a 64-bit accumulator instead of bit by bit, non-zero
+  counts of neighbour blocks are cached, encoder/decoder are separate instantiations
+  (const generic). ~15 %.
+- **Scheduling**: 2 MiB text blocks and stored blocks with at most 2 MiB of PNG/JPEG
+  transformations (see above); before, one stored block with 18 MB of transformations took
+  3.5 s alone on one thread.
+
+| Test build 327.6 MB (with JPEGs) | before | after |
+|---|---:|---:|
+| Archive | 125,489,637 B | 125,544,160 B (+0.04 %) |
+| Unpack, 4 threads | 10.3 s, 0.66 GB RAM | **8.75 s** (−15 %), 0.75 GB RAM |
+| Unpack, 1 thread | 33.1 s | **29.7 s** (−10 %) |
+| Longest block (bounds unpacking on ≥ 8 threads) | 5.6 s | **2.4 s** |
+
+Simulated from the measured block times (ideal scheduling): 8 threads 5.6 → 4.3 s,
+16 threads 5.6 → 2.4 s. Measured back to back on a shared 4-vCPU VM (±10 % noise).
 
 ## Results v3 (extended test build 327.6 MB, with 36 JPEGs)
 

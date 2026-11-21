@@ -402,22 +402,22 @@ fn decode_scan(d: &[u8], j: &mut JInfo) -> Option<usize> {
 // ---------------- Recreate the Huffman scan exactly ----------------
 struct Bw {
     o: Vec<u8>,
-    acc: u32,
+    /// Pending bits (the lowest `cnt` bits are valid, cnt < 8 between calls).
+    acc: u64,
     cnt: u32,
 }
 impl Bw {
+    /// Appends the lowest `len` (<= 32) bits of `v`, MSB first, with 0xFF byte stuffing.
+    #[inline]
     fn bits(&mut self, v: u32, len: u32) {
-        for i in (0..len).rev() {
-            self.acc = (self.acc << 1) | ((v >> i) & 1);
-            self.cnt += 1;
-            if self.cnt == 8 {
-                let b = self.acc as u8;
-                self.o.push(b);
-                if b == 0xFF {
-                    self.o.push(0x00);
-                }
-                self.acc = 0;
-                self.cnt = 0;
+        self.acc = (self.acc << len) | (v as u64 & ((1u64 << len) - 1));
+        self.cnt += len;
+        while self.cnt >= 8 {
+            self.cnt -= 8;
+            let b = (self.acc >> self.cnt) as u8;
+            self.o.push(b);
+            if b == 0xFF {
+                self.o.push(0x00);
             }
         }
     }
@@ -508,20 +508,20 @@ struct Prob {
 const P_INIT: Prob = Prob { f: 32768, s: 32768 };
 
 /// Binary arithmetic coder; the same model function encodes (dec=false) or reads (dec=true).
-struct Ac<'a> {
+/// `DEC`: decoding (bits are read) or encoding (bits are written).
+struct Ac<'a, const DEC: bool> {
     x1: u32,
     x2: u32,
     x: u32,
     out: Vec<u8>,
     src: &'a [u8],
     ip: usize,
-    dec: bool,
 }
-impl<'a> Ac<'a> {
+impl<'a, const DEC: bool> Ac<'a, DEC> {
     fn bit(&mut self, p: &mut Prob, bit: bool) -> bool {
         let pr = ((p.f as u32 + p.s as u32) >> 5).clamp(1, 4095);
         let xmid = self.x1 + (((self.x2 - self.x1) as u64 * pr as u64) >> 12) as u32;
-        let bit = if self.dec { self.x <= xmid } else { bit };
+        let bit = if DEC { self.x <= xmid } else { bit };
         if bit {
             self.x2 = xmid;
             p.f += (65535 - p.f) >> 4;
@@ -532,7 +532,7 @@ impl<'a> Ac<'a> {
             p.s -= p.s >> 7;
         }
         while (self.x1 ^ self.x2) & 0xFF00_0000 == 0 {
-            if self.dec {
+            if DEC {
                 let b = self.src.get(self.ip).copied().unwrap_or(0);
                 self.ip += 1;
                 self.x = (self.x << 8) | b as u32;
@@ -602,9 +602,9 @@ fn qnz(v: i32) -> usize {
     c
 }
 /// Magnitude >= 1: exponent in unary + mantissa
-fn code_mag(a: &mut Ac, ex: &mut [Prob; MAXE], mt: &mut [[Prob; 2]; MAXE], v: i32) -> i32 {
+fn code_mag<const DEC: bool>(a: &mut Ac<DEC>, ex: &mut [Prob; MAXE], mt: &mut [[Prob; 2]; MAXE], v: i32) -> i32 {
     let mut e = 0usize;
-    if !a.dec {
+    if !DEC {
         while (v >> (e + 1)) != 0 && e < MAXE - 1 {
             e += 1;
         }
@@ -628,7 +628,9 @@ fn sign(v: i16) -> i32 {
 }
 
 /// Encode/decode all coefficients of a component (blocks in raster order).
-fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
+fn code_comp<const DEC: bool>(a: &mut Ac<DEC>, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
+    // Number of non-zero AC coefficients per finished block (context for the neighbours)
+    let mut nzc = vec![0i32; c.bw * c.bh];
     for r in 0..c.bh {
         for col in 0..c.bw {
             let o = (r * c.bw + col) * 64;
@@ -650,7 +652,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 pa + pl - pal
             };
             let dq = qmag((pa - pl).abs()).min(7);
-            let mut dr = if a.dec { 0 } else { b[0] as i32 - pred };
+            let mut dr = if DEC { 0 } else { b[0] as i32 - pred };
             if a.bit(&mut m.dz[cls][dq], dr != 0) {
                 let neg = a.bit(&mut m.dsg[cls][dq], dr < 0);
                 let mag = code_mag(a, &mut m.dex[cls][dq], &mut m.dmt[cls], dr.abs());
@@ -658,7 +660,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
             } else {
                 dr = 0;
             }
-            if a.dec {
+            if DEC {
                 let v = pred + dr;
                 if !(-32768..=32767).contains(&v) {
                     return false;
@@ -666,8 +668,9 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 b[0] = v as i16;
             }
             // number of non-zero AC coefficients
-            let na = a_blk.map_or(-1, nzcount);
-            let nl = l_blk.map_or(-1, nzcount);
+            let bi = r * c.bw + col;
+            let na = if r > 0 { nzc[bi - c.bw] } else { -1 };
+            let nl = if col > 0 { nzc[bi - 1] } else { -1 };
             let avg = if na < 0 {
                 nl.max(0)
             } else if nl < 0 {
@@ -676,12 +679,13 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 (na + nl + 1) / 2
             };
             let nzq = qnz(avg);
-            let nnz_in = if a.dec { 0 } else { nzcount(b) };
+            let nnz_in = if DEC { 0 } else { nzcount(b) };
             let mut node = 1usize;
             for bit in (0..6).rev() {
                 node = (node << 1) | a.bit(&mut m.nz[cls][nzq][node], (nnz_in >> bit) & 1 != 0) as usize;
             }
             let mut rem = node as i32 - 64;
+            nzc[bi] = rem;
             // AC in zigzag order
             let mut k = 1usize;
             while k < 64 && rem > 0 {
@@ -703,10 +707,10 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 if rem > 64 - k as i32 {
                     return false;
                 }
-                let v = if a.dec { 0 } else { b[k] as i32 };
+                let v = if DEC { 0 } else { b[k] as i32 };
                 let isnz = if rem == 64 - k as i32 { true } else { a.bit(&mut m.zero[cls][kb][mq][rq], v != 0) };
                 if !isnz {
-                    if a.dec {
+                    if DEC {
                         b[k] = 0;
                     }
                     k += 1;
@@ -719,7 +723,7 @@ fn code_comp(a: &mut Ac, m: &mut Model, c: &mut Comp, cls: usize) -> bool {
                 if am > 1023 {
                     return false;
                 }
-                if a.dec {
+                if DEC {
                     b[k] = if neg { -am } else { am } as i16;
                 }
                 rem -= 1;
@@ -743,7 +747,7 @@ pub fn forward(jpg: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut m = Model::new();
-    let mut a = Ac { x1: 0, x2: 0xFFFF_FFFF, x: 0, out: Vec::new(), src: &[], ip: 0, dec: false };
+    let mut a = Ac::<false> { x1: 0, x2: 0xFFFF_FFFF, x: 0, out: Vec::new(), src: &[], ip: 0 };
     for i in 0..j.nf {
         if !code_comp(&mut a, &mut m, &mut j.c[i], (i > 0) as usize) {
             return None;
@@ -793,7 +797,7 @@ pub fn inverse(t: &[u8], out: &mut [u8]) -> bool {
         return false;
     }
     let mut m = Model::new();
-    let mut a = Ac { x1: 0, x2: 0xFFFF_FFFF, x: 0, out: Vec::new(), src: &t[16 + head + tail..], ip: 0, dec: true };
+    let mut a = Ac::<true> { x1: 0, x2: 0xFFFF_FFFF, x: 0, out: Vec::new(), src: &t[16 + head + tail..], ip: 0 };
     for _ in 0..4 {
         let b = a.src.get(a.ip).copied().unwrap_or(0);
         a.ip += 1;

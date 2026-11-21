@@ -4,7 +4,6 @@
 //! two mixers, two APM stages, binary arithmetic coder. Integers only.
 
 const NHASH: usize = 7; // o1 o2 o3 o4 o6 word column
-const NIN: usize = NHASH + 3; // + o0, Match, Bias
 const HBITS: u32 = 22;
 const LR: i32 = 2;
 const MMBITS: u32 = 20;
@@ -32,6 +31,10 @@ fn squash(d: i32) -> i32 {
 struct Tables {
     stretch: [i16; 4096],
     dt: [i32; 1024],
+    /// `squash(d)` for d in -2048..=2048 (index d + 2048); outside, squash saturates.
+    sq: [u16; 4097],
+    /// `stretch(squash(d))`, same index: saves one dependent lookup per stage.
+    stsq: [i16; 4097],
 }
 fn tables() -> &'static Tables {
     static T: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
@@ -52,7 +55,13 @@ fn tables() -> &'static Tables {
         for (i, d) in dt.iter_mut().enumerate() {
             *d = (65536 * 2) / (2 * i as i32 + 3);
         }
-        Tables { stretch, dt }
+        let (mut sq, mut stsq) = ([0u16; 4097], [0i16; 4097]);
+        for (i, (q, t)) in sq.iter_mut().zip(stsq.iter_mut()).enumerate() {
+            let v = squash(i as i32 - 2048);
+            *q = v as u16;
+            *t = stretch[v as usize];
+        }
+        Tables { stretch, dt, sq, stsq }
     })
 }
 
@@ -72,37 +81,50 @@ fn sm_update(e: &mut u32, bit: i32, dt: &[i32; 1024]) {
     }
     *e = ((p as u32) << 10) | n;
 }
-
-struct Apm {
-    t: Vec<u16>,
-    idx: usize,
+/// Adaptive probability map with `N` contexts of 33 interpolation points each.
+struct Apm<const N: usize> {
+    t: Box<[[u16; 33]; N]>,
+    cx: usize,
+    k: usize,
 }
-impl Apm {
-    /// Table for `n` contexts; an existing buffer is reused.
-    fn with_buffer(mut t: Vec<u16>, n: usize) -> Self {
+impl<const N: usize> Apm<N> {
+    /// Initial table; an existing buffer is reused.
+    fn with_buffer(t: Option<Box<[[u16; 33]; N]>>) -> Self {
         let mut row = [0u16; 33];
         for (j, r) in row.iter_mut().enumerate() {
             *r = (squash((j as i32 - 16) * 128) * 16) as u16;
         }
-        t.clear();
-        t.reserve_exact(n * 33);
-        for _ in 0..n {
-            t.extend_from_slice(&row);
-        }
-        Apm { t, idx: 0 }
+        let t = match t {
+            Some(mut t) => {
+                t.fill(row);
+                t
+            }
+            None => boxed_array(row),
+        };
+        Apm { t, cx: 0, k: 0 }
     }
-    #[inline]
-    fn p(&mut self, stretch: &[i16; 4096], pr: i32, cx: usize) -> i32 {
-        let s = stretch[pr as usize] as i32 + 2048;
-        let (lo, w) = ((s >> 7) as usize, s & 127);
-        self.idx = cx * 33 + lo + (w >> 6) as usize;
-        (self.t[cx * 33 + lo] as i32 * (128 - w) + self.t[cx * 33 + lo + 1] as i32 * w) >> 11
+    /// `s` = stretch(p) + 2048 of the input probability (1..=4095).
+    #[inline(always)]
+    fn p(&mut self, s: i32, cx: usize) -> i32 {
+        let (lo, w) = ((s >> 7) as usize & 31, s & 127);
+        let r = &self.t[cx % N];
+        self.cx = cx % N;
+        self.k = lo + (w >> 6) as usize;
+        (r[lo] as i32 * (128 - w) + r[lo + 1] as i32 * w) >> 11
     }
-    #[inline]
+    #[inline(always)]
     fn update(&mut self, bit: i32) {
         let g = (bit << 16) + (bit << 5) - bit - bit;
-        let t = &mut self.t[self.idx];
+        let t = &mut self.t[self.cx % N][self.k.min(32)];
         *t = t.wrapping_add(((g - *t as i32) >> 6) as u16);
+    }
+}
+
+/// Heap array of `N` copies of `v` (without a large temporary on the stack).
+fn boxed_array<T: Clone, const N: usize>(v: T) -> Box<[T; N]> {
+    match vec![v; N].into_boxed_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!("length is N"),
     }
 }
 
@@ -114,28 +136,66 @@ fn hash2(a: u32, b: u32) -> u32 {
     h ^ (h >> 13)
 }
 
+/// Mixer inputs, padded to a multiple of 4 lanes (the padding inputs are always 0).
+/// Order: hashed contexts 0..NHASH, o0, match, bias. All initial weights are equal,
+/// so the order of the inputs does not influence the result.
+const NX: usize = 12;
+/// Inputs that can be non-zero.
+const NREAL: usize = NHASH + 3;
+const X_MM: usize = NHASH + 1;
+const X_BIAS: usize = NHASH + 2;
+/// Rows of 16 state entries per hash table (entry 0 of a row = check value).
+const ROWS: usize = 1 << (HBITS - 4);
+/// Row tables: NHASH hashed contexts plus one table whose first 17 rows hold o0.
+/// A power of two, so that masked row indices need no bounds check.
+const NTAB: usize = NHASH + 1;
+const HT_ROWS: usize = NTAB * ROWS;
+const O0_BASE: usize = NHASH * ROWS;
+const O0_ROWS: usize = 17;
+const _: () = assert!(HT_ROWS.is_power_of_two());
+
+type Row = [u32; 16];
+type Weights = [[i32; NX]; 256];
+
+#[inline(always)]
+fn dot16(x: &[i32; NX], w: &[i32; NX]) -> i32 {
+    let p = |i: usize| x[i] as i64 * w[i] as i64;
+    // Balanced sum over the real inputs: shorter dependency chain than a serial accumulation
+    let a = (p(0) + p(1)) + (p(2) + p(3));
+    let b = (p(4) + p(5)) + (p(6) + p(7));
+    const _: () = assert!(NREAL == 10);
+    ((a + b + (p(8) + p(9))) >> 16) as i32
+}
+
+#[inline(always)]
+fn train(x: &[i32; NX], w: &mut [i32; NX], err: i32) {
+    for i in 0..NX {
+        w[i] = w[i].wrapping_add(x[i].wrapping_mul(err) >> 10);
+    }
+}
+
 struct Model {
     tab: &'static Tables,
-    ht: Vec<Vec<u32>>,
-    slot: [usize; NHASH],
+    /// All row tables (`HT_ROWS` rows of 16 states).
+    ht: Box<[Row; HT_ROWS]>,
+    /// Row index per input of the current nibble (NHASH hashed contexts, then o0).
+    row: [usize; NTAB],
     hctx: [u32; NHASH],
-    o0: Vec<u32>,
-    o0slot: usize,
-    mm_sm: [u32; 128],
+    mm_sm: [u32; 64],
     mmt: Vec<u32>,
     mptr: u32,
     mlen: u32,
-    w: Vec<[i32; NIN]>,
-    w2: Vec<[i32; NIN]>,
+    w: Box<Weights>,
+    w2: Box<Weights>,
     pm1: i32,
     pm2: i32,
     col: u32,
     linestart: u32,
     above: u32,
-    x: [i32; NIN],
+    x: [i32; NX],
     pmix: i32,
-    a1: Apm,
-    a2: Apm,
+    a1: Apm<256>,
+    a2: Apm<65536>,
     c0: u32,
     c4: u32,
     word0: u32,
@@ -150,19 +210,21 @@ struct Model {
 /// Large buffers of a model (~125 MB), reused per thread:
 /// saves the allocation and the page faults for every block.
 struct Buffers {
-    ht: Vec<Vec<u32>>,
+    ht: Box<[Row; HT_ROWS]>,
     mmt: Vec<u32>,
-    a2: Vec<u16>,
+    a2: Option<Box<[[u16; 33]; 65536]>>,
 }
 impl Buffers {
     fn new() -> Self {
-        Buffers { ht: (0..NHASH).map(|_| vec![0u32; 1 << HBITS]).collect(), mmt: vec![0u32; 1 << MMBITS], a2: Vec::new() }
+        // The rows of the last table after o0 are never touched (no page faults)
+        let mut ht: Box<[Row; HT_ROWS]> = boxed_array([0u32; 16]);
+        ht[O0_BASE..O0_BASE + O0_ROWS].fill([1 << 31; 16]);
+        Buffers { ht, mmt: vec![0u32; 1 << MMBITS], a2: None }
     }
     /// Reset used buffers to the initial state.
     fn cleared(mut self) -> Self {
-        for t in &mut self.ht {
-            t.fill(0);
-        }
+        self.ht[..O0_BASE].fill([0u32; 16]);
+        self.ht[O0_BASE..O0_BASE + O0_ROWS].fill([1 << 31; 16]);
         self.mmt.fill(0);
         self
     }
@@ -178,34 +240,34 @@ fn with_model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
     let mut m = Model::new(bufs);
     let r = f(&mut m);
     let Model { ht, mmt, a2, .. } = *m;
-    CACHE.with(|c| *c.borrow_mut() = Some(Buffers { ht, mmt, a2: a2.t }));
+    CACHE.with(|c| *c.borrow_mut() = Some(Buffers { ht, mmt, a2: Some(a2.t) }));
     r
 }
 
 impl Model {
     fn new(b: Buffers) -> Box<Self> {
+        let mut x = [0i32; NX];
+        x[X_BIAS] = 256;
         let mut m = Box::new(Model {
             tab: tables(),
             ht: b.ht,
-            slot: [0; NHASH],
+            row: [0; NTAB],
             hctx: [0; NHASH],
-            o0: vec![1 << 31; 256 * 16],
-            o0slot: 0,
-            mm_sm: [1 << 31; 128],
+            mm_sm: [1 << 31; 64],
             mmt: b.mmt,
             mptr: 0,
             mlen: 0,
-            w: vec![[(1 << 16) / 4; NIN]; 256],
-            w2: vec![[(1 << 16) / 4; NIN]; 256],
+            w: boxed_array([(1 << 16) / 4; NX]),
+            w2: boxed_array([(1 << 16) / 4; NX]),
             pm1: 0,
             pm2: 0,
             col: 0,
             linestart: 0,
             above: 0,
-            x: [0; NIN],
+            x,
             pmix: 0,
-            a1: Apm::with_buffer(Vec::new(), 256),
-            a2: Apm::with_buffer(b.a2, 65536),
+            a1: Apm::with_buffer(None),
+            a2: Apm::with_buffer(b.a2),
             c0: 1,
             c4: 0,
             word0: 0,
@@ -216,35 +278,35 @@ impl Model {
             mm_idx: 0,
             pos: 0,
         });
-        m.select_slots();
+        m.select_rows();
         m
     }
 
-    /// Choose the slots (16 entries, entry 0 = check value) for the current nibble;
+    /// Choose the rows (16 entries, entry 0 = check value) for the current nibble;
     /// two candidates per context, replace the one with less experience if needed.
-    fn select_slots(&mut self) {
+    fn select_rows(&mut self) {
         let nib = if self.bitpos == 0 { 0 } else { (self.c0 & 15) | 16 };
         for k in 0..NHASH {
             let h = hash2(self.hctx[k], nib + k as u32 * 977);
             let tag = (h & 0xFFFF) | 1;
-            let a = ((h >> (32 - HBITS)) & !31) as usize;
-            let t = &mut self.ht[k];
-            let s = if t[a] == tag {
+            let a = (k * ROWS + ((h >> (36 - HBITS)) as usize & (ROWS - 2))) & (HT_ROWS - 2);
+            let (ra, rb) = (&self.ht[a], &self.ht[a + 1]);
+            let r = if ra[0] == tag {
                 a
-            } else if t[a + 16] == tag {
-                a + 16
+            } else if rb[0] == tag {
+                a + 1
             } else {
-                let s = if (t[a + 1] & 1023) <= (t[a + 17] & 1023) { a } else { a + 16 };
-                t[s] = tag;
-                t[s + 1..s + 16].fill(1 << 31);
-                s
+                let r = if (ra[1] & 1023) <= (rb[1] & 1023) { a } else { a + 1 };
+                let mut fresh = [1u32 << 31; 16];
+                fresh[0] = tag;
+                self.ht[r] = fresh;
+                r
             };
-            self.slot[k] = s;
+            self.row[k] = r;
         }
-        self.o0slot = if nib == 0 { 0 } else { ((nib & 15) + 1) as usize * 16 };
+        self.row[NHASH] = O0_BASE + if nib == 0 { 0 } else { ((nib & 15) + 1) as usize };
     }
 
-    /// At a byte boundary: contexts for the next byte (buf = all bytes so far).
     fn byte_update(&mut self, c: u8, buf: &[u8]) {
         let cc = c as u32;
         self.c4 = (self.c4 << 8) | cc;
@@ -304,59 +366,57 @@ impl Model {
         }
     }
 
+    #[inline(always)]
     fn predict(&mut self, buf: &[u8]) -> u32 {
-        let st = &self.tab.stretch;
-        let j = self.jn;
-        for k in 0..NHASH {
-            self.x[k + 1] = st[sm_p(self.ht[k][self.slot[k] + j])] as i32;
+        let tab = self.tab;
+        let st = &tab.stretch;
+        let j = self.jn & 15;
+        for k in 0..NTAB {
+            self.x[k] = st[sm_p(self.ht[self.row[k] & (HT_ROWS - 1)][j])] as i32;
         }
-        self.x[0] = st[sm_p(self.o0[self.o0slot + j])] as i32;
         self.mm_expect = false;
-        self.x[NHASH + 1] = 0;
+        self.x[X_MM] = 0;
         if self.mlen != 0 {
             let pb = buf[self.mptr as usize] as u32;
             let expect = (pb >> (7 - self.bitpos)) & 1;
             if ((pb | 256) >> (8 - self.bitpos)) == self.c0 {
                 let lb = self.mlen.min(31);
-                self.mm_idx = (lb * 2 + expect) as usize;
+                self.mm_idx = ((lb * 2 + expect) & 63) as usize;
                 self.mm_expect = true;
-                self.x[NHASH + 1] = st[sm_p(self.mm_sm[self.mm_idx])] as i32;
+                self.x[X_MM] = st[sm_p(self.mm_sm[self.mm_idx])] as i32;
             }
         }
-        self.x[NIN - 1] = 256;
-        let (w, w2) = (&self.w[self.c0 as usize], &self.w2[(self.c4 & 0xFF) as usize]);
-        let (mut dot, mut dot2) = (0i64, 0i64);
-        for i in 0..NIN {
-            dot += self.x[i] as i64 * w[i] as i64;
-            dot2 += self.x[i] as i64 * w2[i] as i64;
-        }
-        self.pm1 = squash((dot >> 16) as i32);
-        self.pm2 = squash((dot2 >> 16) as i32);
-        self.pmix = squash((st[self.pm1 as usize] as i32 + st[self.pm2 as usize] as i32) >> 1);
-        let p1 = self.a1.p(st, self.pmix, self.c0 as usize);
-        let p2 = self.a2.p(st, self.pmix, (self.c0 | ((self.c4 & 0xFF) << 8)) as usize);
+        let c0 = self.c0 as usize & 255;
+        let c4b = (self.c4 & 0xFF) as usize;
+        let sq_idx = |d: i32| (d.clamp(-2048, 2048) + 2048) as usize;
+        let i1 = sq_idx(dot16(&self.x, &self.w[c0]));
+        let i2 = sq_idx(dot16(&self.x, &self.w2[c4b]));
+        self.pm1 = tab.sq[i1] as i32;
+        self.pm2 = tab.sq[i2] as i32;
+        // pmix = squash((stretch(pm1) + stretch(pm2)) / 2), the sum is within -2047..=2047
+        let im = (((tab.stsq[i1] as i32 + tab.stsq[i2] as i32) >> 1) + 2048) as usize & 4095;
+        self.pmix = tab.sq[im] as i32;
+        let s = tab.stsq[im] as i32 + 2048;
+        let p1 = self.a1.p(s, c0);
+        let p2 = self.a2.p(s, c0 | (c4b << 8));
         ((self.pmix + p1 + 2 * p2 + 2) >> 2).clamp(1, 4095) as u32
     }
 
+    #[inline(always)]
     fn update(&mut self, bit: i32, buf: &[u8]) {
         let dt = &self.tab.dt;
-        let j = self.jn;
-        for k in 0..NHASH {
-            let s = self.slot[k] + j;
-            sm_update(&mut self.ht[k][s], bit, dt);
+        let j = self.jn & 15;
+        for k in 0..NTAB {
+            sm_update(&mut self.ht[self.row[k] & (HT_ROWS - 1)][j], bit, dt);
         }
-        sm_update(&mut self.o0[self.o0slot + j], bit, dt);
         if self.mm_expect {
             sm_update(&mut self.mm_sm[self.mm_idx], bit, dt);
         }
         let err = ((bit << 12) - self.pm1) * LR;
         let err2 = ((bit << 12) - self.pm2) * LR;
         let c4b = (self.c4 & 0xFF) as usize;
-        let (w, w2) = (&mut self.w[self.c0 as usize], &mut self.w2[c4b]);
-        for i in 0..NIN {
-            w[i] = w[i].wrapping_add((self.x[i] * err) >> 10);
-            w2[i] = w2[i].wrapping_add((self.x[i] * err2) >> 10);
-        }
+        train(&self.x, &mut self.w[self.c0 as usize & 255], err);
+        train(&self.x, &mut self.w2[c4b], err2);
         self.a1.update(bit);
         self.a2.update(bit);
         self.c0 = (self.c0 << 1) | bit as u32;
@@ -364,7 +424,7 @@ impl Model {
         self.bitpos += 1;
         if self.bitpos == 4 {
             self.jn = 1;
-            self.select_slots();
+            self.select_rows();
         } else if self.bitpos == 8 {
             let c = self.c0 as u8;
             self.pos += 1;
@@ -372,7 +432,7 @@ impl Model {
             self.c0 = 1;
             self.bitpos = 0;
             self.jn = 1;
-            self.select_slots();
+            self.select_rows();
         }
     }
 }

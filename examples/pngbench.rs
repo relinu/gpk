@@ -11,7 +11,7 @@ fn main() {
         let png = std::fs::read(f).unwrap();
         bytes += png.len();
         let t = Instant::now();
-        let r = gpk::pngx::forward(&png, 1);
+        let r = gpk::pngx::forward(&png, std::env::args().nth(2).map_or(1, |s| s.parse().unwrap()));
         tf += t.elapsed().as_secs_f64();
         if let Some(t1) = r {
             ok += 1;

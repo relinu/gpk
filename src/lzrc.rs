@@ -313,17 +313,35 @@ impl<'a> Rcd<'a> {
         }
         b
     }
+    /// Same as `bit`, without data-dependent branches (for poorly predictable bits).
+    #[inline(always)]
+    fn bit_bl(&mut self, p: &mut u16) -> u32 {
+        let pv = *p as u32;
+        let bound = (self.range >> 11) * pv;
+        let b = (self.code >= bound) as u32;
+        let mask = b.wrapping_neg();
+        self.code -= bound & mask;
+        self.range = (bound & !mask) | ((self.range - bound) & mask);
+        let p0 = pv + ((2048 - pv) >> 5);
+        let p1 = pv - (pv >> 5);
+        *p = ((p0 & !mask) | (p1 & mask)) as u16;
+        if self.range < (1 << 24) {
+            self.range <<= 8;
+            self.code = (self.code << 8) | self.next() as u32;
+        }
+        b
+    }
     fn tree(&mut self, probs: &mut [u16], nb: u32) -> u32 {
         let mut m = 1usize;
         for _ in 0..nb {
-            m = (m << 1) | self.bit(&mut probs[m]) as usize;
+            m = (m << 1) | self.bit_bl(&mut probs[m]) as usize;
         }
         (m - (1 << nb)) as u32
     }
     fn rtree(&mut self, probs: &mut [u16], base: usize, nb: u32) -> u32 {
         let (mut m, mut sym) = (1usize, 0u32);
         for i in 0..nb {
-            let b = self.bit(&mut probs[base + m - 1]);
+            let b = self.bit_bl(&mut probs[base + m - 1]);
             m = (m << 1) | b as usize;
             sym |= b << i;
         }
@@ -390,22 +408,21 @@ pub fn decompress(src: &[u8], out: &mut [u8]) -> Option<()> {
                 if r0 >= pos {
                     return None;
                 }
-                let mb = out[pos - r0 - 1] as usize;
-                let mut same = true;
-                for i in (0..8).rev() {
-                    let b = if same {
-                        let mbit = (mb >> i) & 1;
-                        let b = rc.bit(&mut probs[0x100 + (mbit << 8) + mm]) as usize;
-                        same = b == mbit;
-                        b
-                    } else {
-                        rc.bit(&mut probs[mm]) as usize
-                    };
+                // Matched literal: while the decoded bits equal those of the match byte,
+                // the probabilities at 0x100 + (match bit << 8) are used, afterwards the plain ones.
+                let mut mb = out[pos - r0 - 1] as usize;
+                let mut offs = 0x100usize;
+                for _ in 0..8 {
+                    mb <<= 1;
+                    let mbit = offs & mb;
+                    let b = rc.bit_bl(&mut probs[offs + mbit + mm]) as usize;
                     mm = (mm << 1) | b;
+                    // Keep offs only while b equals the match bit
+                    offs &= ((b << 8) ^ mbit ^ 0x100) & 0x100;
                 }
             } else {
                 while mm < 0x100 {
-                    mm = (mm << 1) | rc.bit(&mut probs[mm]) as usize;
+                    mm = (mm << 1) | rc.bit_bl(&mut probs[mm & 0xFF]) as usize;
                 }
             }
             out[pos] = mm as u8;

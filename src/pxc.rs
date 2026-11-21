@@ -148,6 +148,28 @@ fn med(w: i32, n: i32, nw: i32) -> i32 {
     }
 }
 
+/// `(1 << 40) / (e * e)` for small e (the common case; a division is slow).
+const WT_N: usize = 1024;
+fn wt_table() -> &'static [i64; WT_N] {
+    static T: std::sync::OnceLock<[i64; WT_N]> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = [0i64; WT_N];
+        for (e, v) in t.iter_mut().enumerate().skip(1) {
+            *v = (1i64 << 40) / (e as i64 * e as i64);
+        }
+        t
+    })
+}
+
+/// `a / b` rounded toward zero, like the integer division, but much cheaper than a 64-bit
+/// `idiv` on many CPUs. Exact as long as |a|, |b| < 2^53 and 1/|b| > |a/b| * 2^-53: then the
+/// quotient is either an integer (computed exactly) or too far from the next integer for the
+/// f64 rounding error to reach it. The callers' value ranges are stated at the call sites.
+#[inline(always)]
+fn div_trunc(a: i64, b: i64) -> i64 {
+    (a as f64 / b as f64) as i64
+}
+
 struct Ctx {
     pred: i32,
     ctx: usize,
@@ -174,6 +196,7 @@ fn context(m: &Model, c: &Chan, w: usize, x: usize, y: usize, k: usize, r0mag: i
     let p = [med(wv, n, nw), g.clamp(mn, mx), wv, n, (wv + n + 1) >> 1, (wv + n + nw + ne + 2) >> 2];
     // Weighted mix: weight ~ 1 / (local error)^2
     let (mut num, mut den) = (0i64, 0i64);
+    let wtt = wt_table();
     for (i, &pi) in p.iter().enumerate() {
         let mut e: u32 = 1;
         if y > 0 {
@@ -189,11 +212,13 @@ fn context(m: &Model, c: &Chan, w: usize, x: usize, y: usize, k: usize, r0mag: i
         if x > 0 {
             e += 2 * c.pe[i][1][x - 1] as u32;
         }
-        let wt = (1i64 << 40) / (e as i64 * e as i64);
+        let wt = if (e as usize) < WT_N { wtt[e as usize] } else { (1i64 << 40) / (e as i64 * e as i64) };
         num += wt * pi as i64;
         den += wt;
     }
-    let blend = ((num + den / 2) / den) as i32;
+    // den <= 6 * 2^40, |num| <= 255 * den < 2^51 and den >= 60: the quotient (|q| <= 256) is
+    // either exact or at least 1/den > 2^-44 away from an integer, more than the f64 error.
+    let blend = div_trunc(num + den / 2, den) as i32;
     let re = &c.re;
     let mut en = if x > 0 { re[1][x - 1] as i32 } else { 0 } + if y > 0 { re[0][x] as i32 } else { 0 };
     if y > 0 && x > 0 {
@@ -209,7 +234,8 @@ fn context(m: &Model, c: &Chan, w: usize, x: usize, y: usize, k: usize, r0mag: i
     let eq = qclass(en, &TERR);
     let ctx = qclass(act, &TACT) * NERR + eq;
     let bc = m.bcnt[k][ctx];
-    let bias = if bc != 0 { m.bsum[k][ctx] / bc } else { 0 };
+    // |bsum| < 2^20 and 1 <= bc < 32
+    let bias = if bc != 0 { div_trunc(m.bsum[k][ctx] as i64, bc as i64) as i32 } else { 0 };
     Ctx { pred: blend + bias, ctx, eq, p }
 }
 
@@ -220,7 +246,7 @@ fn learn(m: &mut Model, c: &mut Chan, x: usize, k: usize, o: &Ctx, v: i32) {
     let r = v - o.pred;
     c.re[1][x] = r.unsigned_abs() as u16;
     let (bs, bc) = (&mut m.bsum[k][o.ctx], &mut m.bcnt[k][o.ctx]);
-    *bs += r + if *bc != 0 { *bs / *bc } else { 0 };
+    *bs += r + if *bc != 0 { div_trunc(*bs as i64, *bc as i64) as i32 } else { 0 };
     *bc += 1;
     if *bc >= 32 {
         *bs /= 2;

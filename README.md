@@ -36,6 +36,12 @@ Both columns were measured back to back. The plain port was as fast as the C ver
 (in an earlier measurement packing took 104.7 s vs. 104.3 s).
 What was optimized and what did not help: [docs/GPK.md](docs/GPK.md#speed-rust-version).
 
+**Unpacking** was optimized further (format unchanged, kernels still byte-identical to C):
+text core −13–15 % instructions per bit, LZRC decoder +10–20 %, PNG/JPEG inverse ~5–15 %,
+and smaller text/transformation blocks for more parallelism. On the extended test build
+(327.6 MB): 4 threads 10.3 → **8.75 s**, longest block 5.6 → 2.4 s (relevant from 8 threads),
+archive +0.04 %. Details: [docs/GPK.md](docs/GPK.md#unpacking).
+
 ## Quick start
 
 ```bash

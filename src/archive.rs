@@ -20,9 +20,14 @@ const NONE: u32 = u32::MAX;
 const SAMPLE: usize = 384 << 10;
 const HDR_SIZE: usize = 4 + 8 + 8 + 8 + 1;
 const MAX_XFORM_SSIZE: u64 = 1 << 30;
-/// Block size for text with the context-mixing core (TCM unpacks only ~1.5 MB/s per thread;
-/// 4 MiB: measured +0.45 % text size compared to 8 MiB, unpacking much more parallel)
-const TEXT_BLOCK: u64 = 4 << 20;
+/// Block size for text with the context-mixing core (TCM unpacks only ~1–1.5 MB/s per thread,
+/// so the largest text block bounds the unpacking time on many cores). 2 MiB instead of 4 MiB:
+/// +0.04 % archive size on the test build, the longest block takes half as long.
+const TEXT_BLOCK: u64 = 2 << 20;
+/// Stored blocks hold at most this many bytes of PNG/JPEG transformations (unless a single
+/// one is larger): their inverse (pixel/coefficient decoding) is the expensive part of
+/// unpacking such a block, smaller blocks spread it over the threads. Costs no ratio.
+const XFORM_BLOCK: u64 = 2 << 20;
 
 pub const CODEC_STORED: u8 = 0;
 pub const CODEC_LZRC: u8 = 1;
@@ -881,6 +886,7 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
     for raw in [false, true] {
         let mut cur: Option<usize> = None;
         let mut last_text = false;
+        let mut cur_xf = 0u64; // transformation bytes in the current block
         for &ci in &order {
             let c = &contents[ci];
             if (c.cls == CL_RAW) != raw {
@@ -892,17 +898,20 @@ pub fn compress(dir: &Path, outpath: &Path, opt_in: &Options) -> Result<()> {
             while off < c.ssize {
                 let len = (c.ssize - off).min(cap) as u32;
                 let is_text = c.cls == CL_TEXT;
+                let xf = if raw && c.xform != XF_NONE { len as u64 } else { 0 };
                 let need_new = match cur {
                     None => true,
                     Some(b) => {
-                        (blocks[b].usize + len as u64 > cap && !blocks[b].pieces.is_empty())
-                            || (!blocks[b].pieces.is_empty() && is_text != last_text)
+                        !blocks[b].pieces.is_empty()
+                            && (blocks[b].usize + len as u64 > cap || is_text != last_text || (xf > 0 && cur_xf + xf > XFORM_BLOCK))
                     }
                 };
                 if need_new {
                     blocks.push(Block { codec: if raw { CODEC_STORED } else { opt.codec }, ..Default::default() });
                     cur = Some(blocks.len() - 1);
+                    cur_xf = 0;
                 }
+                cur_xf += xf;
                 last_text = is_text;
                 let b = &mut blocks[cur.unwrap()];
                 b.pieces.push(Piece { content: ci as u32, off, len });
