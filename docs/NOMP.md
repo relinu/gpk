@@ -34,16 +34,34 @@ budget = T × archive_size / D
 
 (plus a short tail: the last block can only start when it has arrived, see section 9).
 
-| Download | Archive (125 MB) arrives in | Budget with 4 threads | 8 threads | 16 threads |
-|---|---:|---:|---:|---:|
-| 100 Mbit/s | 10.0 s | 40 s | 80 s | 160 s |
-| 250 Mbit/s | 4.0 s | 16 s | 32 s | 64 s |
-| 500 Mbit/s | 2.0 s | 8 s | 16 s | 32 s |
-| 1 Gbit/s | 1.0 s | 4 s | 8 s | 16 s |
+Since SMT threads share a core, the budget uses **effective threads**: cores × 1.25 with
+SMT, minus one thread for the download, disk writes and the system. Times are measured on the
+reference VM of this document (Xeon, 2.1 GHz); desktop cores of 2020+ are usually faster,
+which gives a safety margin.
 
-Today's 29.7 s fit 100 Mbit/s on 4 threads, but not 500 Mbit/s on 8 threads.
-**Proposed design point: 500 Mbit/s on 8 threads → ≤ 16 s CPU for this build**
-(≈ 0.13 s per compressed MB). The design point is a parameter, not a constant (section 8).
+### Reference points (researched November 2026)
+
+| Data | Value | Source |
+|---|---|---|
+| Fiber, measured medians of the leading US fiber providers | ~360–370 Mbit/s | Ookla H1/H2 2025 |
+| Fixed broadband Germany (all technologies), median | ~102 Mbit/s | Ookla 2025 |
+| 5G, Germany per operator | ~110–190 Mbit/s | Opensignal, Nov. 2026 |
+| 5G standalone, Europe / Americas | ~205–221 / ~384 Mbit/s | Ookla 2025 |
+| CPU cores on Steam | 8 cores 28.7 %, 6 cores 27.3 % (most with SMT → 16/12 threads), 4 cores ~13 % | Steam survey, Oct. 2026 |
+| Consoles (PS5, Xbox Series), handheld (Steam Deck) | 8 cores/16 threads; 4 cores/8 threads | manufacturer data |
+
+| Profile | Download | Device | Effective threads | Budget per compressed MB | Test build (125.5 MB) |
+|---|---:|---|---:|---:|---:|
+| **Fiber, typical** (design point) | 400 Mbit/s | 6 cores/12 threads | 6.5 | **0.13 s** | **16 s** |
+| 5G | 200 Mbit/s | 4 cores/8 threads (handheld, laptop) | 4 | 0.16 s | 20 s |
+| Fiber, gigabit | 1 Gbit/s | 8 cores/16 threads | 9 | 0.072 s | 9 s |
+| DSL/cable Germany, median | 100 Mbit/s | 6 cores/12 threads | 6.5 | 0.52 s | 65 s |
+
+**Design point: typical fiber, 400 Mbit/s on a 6-core CPU → ≤ 0.13 s of decoding CPU time
+per compressed MB** (16 s for the test build). It also covers 5G on a 4-core handheld. With
+gigabit fiber on 8 cores, decoding takes at most ~1.8× the download time (16 s / 9 threads ≈
+1.8 s after a 1.0 s download). Today's GPK (29.7 s) keeps up with none of the first three
+profiles, only with the 100 Mbit/s one. The budget stays a parameter (section 8).
 
 Important consequence: the budget is per **compressed** byte. Data that compresses very well
 (text, 11:1) gets very little time per raw byte; data that barely compresses gets a lot. A
@@ -174,14 +192,53 @@ ratio gain of the models on literals only (assumed 60–80 % of zpaq's gain).
 
 | Design point | Archive | Unpack CPU (1 thread) | Keeps up with |
 |---|---:|---:|---|
-| Today | 125.5 MB | 29.7 s | 250 Mbit/s with 8 threads |
-| NOMP `--fast` | ~126–127 MB | ~5 s | 1 Gbit/s with 8 threads |
-| **NOMP, 500 Mbit/s × 8 threads** | **~121–123 MB** | ≤ 16 s | 500 Mbit/s with 8 threads |
-| NOMP, 100 Mbit/s × 8 threads | ~119–121 MB | ≤ 80 s | 100 Mbit/s with 8 threads |
+| Today | 125.5 MB | 29.7 s | 100 Mbit/s profile only |
+| NOMP `--fast` | ~126–127 MB | ~5 s | all profiles incl. gigabit |
+| **NOMP, design point (typical fiber)** | **~121–123 MB** | ≤ 16 s | typical fiber, 5G |
+| NOMP, 100 Mbit/s profile | ~119–121 MB | ≤ 65 s | 100 Mbit/s |
 | Context-mixing reference (zpaq -m5) | ~117 MB | minutes | – |
 
 The range of the main design point (−2 to −3.5 % archive size *and* half the decoding time
 of today) is the claim that phase 1 has to confirm.
+
+## 10a. Graphics cards (GPU)
+
+**What runs well on a GPU**: thousands of independent, identical work items. Measured
+examples: interleaved rANS decoding at ~480–590 GB/s on an H100 (nvCOMP ANS, DietGPU), LZ4
+~100–220 GB/s (nvCOMP on A100, hardware decompression engine on Blackwell), GDeflate in
+DirectStorage up to ~13 GB/s from the SSD into video memory. All of them get their parallelism
+from **many small independent chunks** (typically 64 KiB) or from 32+ interleaved rANS
+states – at the price of small LZ windows (GDeflate compresses like Deflate, not like LZMA).
+
+**What does not run well**: context mixing. Every bit depends on the previous one, the models
+need large hash tables (16 MB per model) with random accesses, and a GPU thread is much slower
+than a CPU core on such serial, cache-missing code. Thousands of independent CM streams would
+need thousands of tables (impossible in video memory) or tiny tables (ratio lost). The same
+holds for LZRC and TCM. No published GPU decoder for context mixing was found.
+
+**What that means for NOMP**:
+
+| NOMP part | GPU suitable? | Note |
+|---|---|---|
+| Fast path: static rANS streams | yes | with 32 interleaved states per stream (block parameter) |
+| LZ copy (64 MiB window) | partly | sequential within a block; parallel only with independent sub-chunks (costs ratio) |
+| Modelled literals (sparse CM) | no | serial per bit, large tables |
+| PNG/JPEG inverse | no | serial entropy coding as well |
+
+**Benefit for GPK's use case (download → install to disk)**: small. The bottleneck under the
+download budget is the modelled path, which cannot run on the GPU; the fast path already
+decodes faster than any download on a few CPU threads (~250 MB/s of output per thread as a
+target). The GPU would also bring drivers, a shader toolchain (e.g. `wgpu`) and a second
+implementation that must be bit-identical, and data would have to travel to the GPU and back.
+
+**Where a GPU would pay off**: loading assets at **game runtime** (SSD → video memory,
+DirectStorage style), where the data ends up on the GPU anyway and GB/s matter. That is a
+different product from GPK. Cheap preparation that keeps the option open: the number of
+interleaved rANS states per stream is a block parameter (1–2 for CPUs, 32 for GPUs), so a
+GPU-oriented variant needs no new format. Packing could use the GPU to evaluate model
+configurations in parallel, but packing time is the lower priority.
+
+**Decision**: no GPU decoder for NOMP; GPU-ready fast path via the lane parameter only.
 
 ## 11. What is borrowed, what is new
 
@@ -226,8 +283,24 @@ fast path (the former STRATA goal: LZRC ratio, much faster decoding).
 
 ## 14. Open decisions
 
-- **Reference point**: 500 Mbit/s on 8 threads as proposed, or another one (e.g. 1 Gbit/s,
-  or a weaker machine with 4 threads)?
+- **Reference point**: typical fiber (400 Mbit/s, 6 cores) as proposed, or the stricter
+  gigabit profile (then ~9 s budget, ratio closer to today's archive)?
 - **Streaming unpack** (section 9) as part of NOMP, or keep unpacking from a complete file
   and only use the budget as the speed target?
 - Replace LZRC/TCM in GPK completely once NOMP is ready, or keep them as additional codecs?
+
+## Sources (reference points and GPU figures)
+
+- Ookla H2 2025 connectivity report (summary): https://www.rcrwireless.com/20260203/5g/ookla
+- Ookla H1 2025 US fiber medians: https://tech.yahoo.com/computing/articles/speed-test-results-reveal-t-220600639.html
+- Fixed broadband Germany, Ookla-based: https://germanpedia.com/eu-fastest-internet-speed/
+- Opensignal Germany, November 2026: https://insights.opensignal.com/reports/2026/11/germany/mobile-network-experience
+- Ookla 5G SA Europe vs. Americas: https://www.rcrwireless.com/20250225/5g/5g-sa-europe
+- Steam hardware survey, October 2026: https://wccftech.com/october-2026-steam-hardware-survey-16-gb-ram-reclaims-top-spot-intel-gains-cpu-share-linux-approaches-4/
+- nvCOMP algorithm selection: https://docs.nvidia.com/cuda/nvcomp/algorithm_selection.html
+- nvCOMP benchmarks (LZ4 on A100): https://github.com/npnothard/nvcomp-v2.2/blob/main/doc/Benchmarks.md
+- GPU rANS (DietGPU, nvcomp-ANS on H100): https://arxiv.org/pdf/2606.18900
+- Blackwell decompression engine: https://arxiv.org/pdf/2512.02189
+- DirectStorage/GDeflate in 3DMark: https://www.tomshardware.com/video-games/pc-gaming/3dmark-gets-new-directstorage-benchmark-gdeflate-measures-transfer-rates-from-nvme-ssd-to-gpu-vram
+- Interleaved entropy coders (Giesen): https://arxiv.org/abs/1402.3392
+- Recoil, parallel rANS decoding: https://arxiv.org/abs/2306.12141
