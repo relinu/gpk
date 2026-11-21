@@ -1,6 +1,6 @@
 # NOMP – design of an own compression core (draft, not implemented)
 
-Status: **design for review**. Nothing in this document is implemented yet. Figures for NOMP
+Status: **design for review**; binding requirements: [NOMP_SPEC.md](NOMP_SPEC.md). Nothing in this document is implemented yet. Figures for NOMP
 are targets or estimates; all other figures are measurements on the extended test build
 (327.6 MB, 4-vCPU VM, release build of `d809ce1`).
 
@@ -281,13 +281,14 @@ fast path (the former STRATA goal: LZRC ratio, much faster decoding).
 5. **Final measurement**: size and decoding time per design point, simulated download
    (throttled pipe) at 100/500/1000 Mbit/s.
 
-## 14. Open decisions
+## 14. Decisions
 
-- **Reference point**: typical fiber (400 Mbit/s, 6 cores) as proposed, or the stricter
-  gigabit profile (then ~9 s budget, ratio closer to today's archive)?
-- **Streaming unpack** (section 9) as part of NOMP, or keep unpacking from a complete file
-  and only use the budget as the speed target?
-- Replace LZRC/TCM in GPK completely once NOMP is ready, or keep them as additional codecs?
+- Reference point: **typical fiber** (400 Mbit/s, 6 cores) – decided.
+- **Unpacking during the download** (section 9) – decided, part of NOMP.
+- No GPU decoder (section 10a).
+- Open: replace LZRC/TCM in GPK completely once NOMP is ready, or keep them as additional codecs.
+
+The binding requirements are summarized in [NOMP_SPEC.md](NOMP_SPEC.md).
 
 ## Sources (reference points and GPU figures)
 

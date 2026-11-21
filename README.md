@@ -43,7 +43,8 @@ and smaller text/transformation blocks for more parallelism. On the extended tes
 archive +0.04 %. Details: [docs/GPK.md](docs/GPK.md#unpacking).
 
 Planned: NOMP, an own compression core with the highest ratio that still unpacks as fast as
-the archive downloads; design draft in [docs/NOMP.md](docs/NOMP.md) (not implemented yet).
+the archive downloads; design draft in [docs/NOMP.md](docs/NOMP.md), requirements in
+[docs/NOMP_SPEC.md](docs/NOMP_SPEC.md) (not implemented yet).
 
 ## Quick start
 
