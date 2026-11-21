@@ -42,6 +42,9 @@ and smaller text/transformation blocks for more parallelism. On the extended tes
 (327.6 MB): 4 threads 10.3 → **8.75 s**, longest block 5.6 → 2.4 s (relevant from 8 threads),
 archive +0.04 %. Details: [docs/GPK.md](docs/GPK.md#unpacking).
 
+Planned: an own asymmetric core with fast table-driven decoding, design draft in
+[docs/STRATA.md](docs/STRATA.md) (not implemented yet).
+
 ## Quick start
 
 ```bash
